@@ -1,0 +1,15 @@
+[package]
+name = "grustyvman"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk4 = { version = "0.10", features = ["v4_12"] }
+libadwaita = { version = "0.8", features = ["v1_4"] }
+glib = "0.21"
+gio = "0.21"
+virt = "0.4"
+quick-xml = "0.37"
+async-channel = "2.3"
+log = "0.4"
+env_logger = "0.11"
