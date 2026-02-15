@@ -1,5 +1,183 @@
 use std::fmt;
 
+// --- Performance Monitoring Types ---
+
+pub struct RawPerfSample {
+    pub timestamp_ns: u64,
+    pub cpu_time_ns: u64,
+    pub nr_vcpus: u32,
+    pub memory_total_kib: u64,
+    pub memory_unused_kib: u64,
+    pub disk_rd_bytes: i64,
+    pub disk_wr_bytes: i64,
+    pub net_rx_bytes: i64,
+    pub net_tx_bytes: i64,
+}
+
+pub struct PerfDataPoint {
+    pub cpu_percent: f64,
+    pub memory_used_percent: f64,
+    pub memory_used_mib: f64,
+    pub memory_total_mib: f64,
+    pub disk_read_bytes_sec: f64,
+    pub disk_write_bytes_sec: f64,
+    pub net_rx_bytes_sec: f64,
+    pub net_tx_bytes_sec: f64,
+}
+
+// --- Storage Pool Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolState {
+    Inactive,
+    Building,
+    Running,
+    Degraded,
+    Inaccessible,
+}
+
+impl PoolState {
+    pub fn from_libvirt(state: u32) -> Self {
+        match state {
+            0 => PoolState::Inactive,
+            1 => PoolState::Building,
+            2 => PoolState::Running,
+            3 => PoolState::Degraded,
+            4 => PoolState::Inaccessible,
+            _ => PoolState::Inactive,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            PoolState::Inactive => "Inactive",
+            PoolState::Building => "Building",
+            PoolState::Running => "Active",
+            PoolState::Degraded => "Degraded",
+            PoolState::Inaccessible => "Inaccessible",
+        }
+    }
+
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            PoolState::Running => "status-running",
+            PoolState::Building => "status-paused",
+            PoolState::Inactive => "status-shutoff",
+            PoolState::Degraded | PoolState::Inaccessible => "status-crashed",
+        }
+    }
+}
+
+impl fmt::Display for PoolState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PoolInfo {
+    pub name: String,
+    pub uuid: String,
+    pub state: PoolState,
+    pub capacity: u64,
+    pub allocation: u64,
+    pub available: u64,
+    pub active: bool,
+    pub persistent: bool,
+    pub autostart: bool,
+}
+
+impl PoolInfo {
+    pub fn subtitle(&self) -> String {
+        if self.active {
+            format!("{} - {}", self.state, format_bytes(self.capacity))
+        } else {
+            self.state.to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeType {
+    File,
+    Block,
+    Dir,
+    Network,
+    NetDir,
+    Ploop,
+}
+
+impl VolumeType {
+    pub fn from_libvirt(kind: u32) -> Self {
+        match kind {
+            0 => VolumeType::File,
+            1 => VolumeType::Block,
+            2 => VolumeType::Dir,
+            3 => VolumeType::Network,
+            4 => VolumeType::NetDir,
+            5 => VolumeType::Ploop,
+            _ => VolumeType::File,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            VolumeType::File => "File",
+            VolumeType::Block => "Block",
+            VolumeType::Dir => "Directory",
+            VolumeType::Network => "Network",
+            VolumeType::NetDir => "NetDir",
+            VolumeType::Ploop => "Ploop",
+        }
+    }
+}
+
+impl fmt::Display for VolumeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VolumeInfo {
+    pub name: String,
+    pub path: String,
+    pub kind: VolumeType,
+    pub capacity: u64,
+    pub allocation: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PoolCreateParams {
+    pub target_path: String,
+    pub source_device: String,
+    pub source_host: String,
+    pub source_dir: String,
+    pub source_name: String,
+    pub source_format: String,
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+
+    if bytes >= TIB {
+        format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+// --- VM Types ---
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootDevice {
     Hd,

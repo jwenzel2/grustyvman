@@ -14,6 +14,49 @@ pub struct NewVmParams {
     pub iso_path: Option<String>,
 }
 
+pub fn extract_interface_targets(xml: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut in_devices = false;
+    let mut in_interface = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "devices" => in_devices = true,
+                    "interface" if in_devices => in_interface = true,
+                    "target" if in_interface => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                targets.push(dev);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "devices" => in_devices = false,
+                    "interface" => in_interface = false,
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+
+    targets
+}
+
 pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
     let memory_kib = params.memory_mib * 1024;
 
