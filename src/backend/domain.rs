@@ -2,7 +2,7 @@ use virt::connect::Connect;
 use virt::domain::Domain;
 use crate::error::AppError;
 
-fn with_domain<F, R>(uri: &str, uuid: &str, f: F) -> Result<R, AppError>
+pub(crate) fn with_domain<F, R>(uri: &str, uuid: &str, f: F) -> Result<R, AppError>
 where
     F: FnOnce(&Domain) -> Result<R, AppError>,
 {

@@ -1,6 +1,7 @@
 pub mod add_disk_dialog;
 pub mod add_network_dialog;
 pub mod create_pool_dialog;
+pub mod create_snapshot_dialog;
 pub mod create_volume_dialog;
 pub mod perf_graph;
 pub mod pool_details_view;
@@ -11,4 +12,5 @@ pub mod vm_details_view;
 pub mod vm_list_view;
 pub mod vm_performance_view;
 pub mod vm_row;
+pub mod vm_snapshot_view;
 pub mod window;

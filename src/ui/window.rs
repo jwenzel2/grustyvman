@@ -14,6 +14,7 @@ use crate::ui::pool_details_view::PoolDetailsView;
 use crate::ui::pool_row::PoolRow;
 use crate::ui::vm_details_view::VmDetailsView;
 use crate::ui::vm_performance_view::VmPerformanceView;
+use crate::ui::vm_snapshot_view::VmSnapshotView;
 use crate::ui::vm_list_view;
 
 fn spawn_blocking<F, T>(f: F) -> async_channel::Receiver<T>
@@ -42,6 +43,7 @@ mod imp {
         pub view_stack: adw::ViewStack,
         pub details_view: VmDetailsView,
         pub perf_view: VmPerformanceView,
+        pub snapshot_view: VmSnapshotView,
         pub toast_overlay: adw::ToastOverlay,
         pub connection_uri: RefCell<String>,
         pub selected_uuid: RefCell<Option<String>>,
@@ -77,6 +79,7 @@ mod imp {
                 view_stack: adw::ViewStack::new(),
                 details_view: VmDetailsView::new(),
                 perf_view: VmPerformanceView::new(),
+                snapshot_view: VmSnapshotView::new(),
                 toast_overlay: adw::ToastOverlay::new(),
                 connection_uri: RefCell::new("qemu:///system".to_string()),
                 selected_uuid: RefCell::new(None),
@@ -293,6 +296,17 @@ impl Window {
 
         content_toolbar.add_top_bar(&content_header);
 
+        // Bottom bar fallback for narrow windows
+        let view_switcher_bar = adw::ViewSwitcherBar::new();
+        view_switcher_bar.set_stack(Some(&imp.view_stack));
+        content_toolbar.add_bottom_bar(&view_switcher_bar);
+
+        // Reveal bottom bar when title can't show tabs
+        view_switcher_title
+            .bind_property("title-visible", &view_switcher_bar, "reveal")
+            .sync_create()
+            .build();
+
         // --- ViewStack (Details + Performance) ---
         let view_stack = &imp.view_stack;
 
@@ -311,6 +325,9 @@ impl Window {
         perf_scrolled.set_child(Some(&perf_clamp));
         let perf_page = view_stack.add_titled(&perf_scrolled, Some("performance"), "Performance");
         perf_page.set_icon_name(Some("utilities-system-monitor-symbolic"));
+
+        let snap_page = view_stack.add_titled(&imp.snapshot_view.container, Some("snapshots"), "Snapshots");
+        snap_page.set_icon_name(Some("camera-photo-symbolic"));
 
         // --- Pool content ---
         let pool_scrolled = gtk::ScrolledWindow::new();
@@ -479,6 +496,7 @@ impl Window {
 
         self.connect_action_buttons();
         self.connect_pool_action_buttons();
+        self.connect_snapshot_callbacks();
 
         // Auto-refresh timer
         let win = self.downgrade();
@@ -924,6 +942,11 @@ impl Window {
 
                     win.imp().details_view.update(&details, state_label, domain_id, autostart);
                     win.imp().outer_stack.set_visible_child_name("vm-content");
+
+                    let uuid_for_snap = win.imp().selected_uuid.borrow().clone();
+                    if let Some(uuid) = uuid_for_snap {
+                        win.load_snapshots(&uuid);
+                    }
 
                     *win.imp().disk_targets.borrow_mut() = disk_targets;
                     *win.imp().iface_targets.borrow_mut() = iface_targets;
@@ -1453,6 +1476,197 @@ impl Window {
                 }
             }
         });
+    }
+
+    // --- Snapshot methods ---
+
+    fn connect_snapshot_callbacks(&self) {
+        let win = self.downgrade();
+        self.imp().snapshot_view.set_on_create(move || {
+            if let Some(win) = win.upgrade() {
+                win.show_create_snapshot_dialog();
+            }
+        });
+
+        let win = self.downgrade();
+        self.imp().snapshot_view.set_on_revert(move |snap_name| {
+            if let Some(win) = win.upgrade() {
+                win.confirm_and_revert_snapshot(&snap_name);
+            }
+        });
+
+        let win = self.downgrade();
+        self.imp().snapshot_view.set_on_delete(move |snap_name| {
+            if let Some(win) = win.upgrade() {
+                win.confirm_and_delete_snapshot(&snap_name);
+            }
+        });
+    }
+
+    fn load_snapshots(&self, uuid: &str) {
+        let uri = self.imp().connection_uri.borrow().clone();
+        let uuid = uuid.to_string();
+        let win = self.downgrade();
+
+        let rx = spawn_blocking(move || backend::snapshot::list_snapshots(&uri, &uuid));
+
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+
+            match result {
+                Ok(snapshots) => {
+                    win.imp().snapshot_view.update(&snapshots);
+                }
+                Err(e) => {
+                    log::error!("Failed to load snapshots: {e}");
+                    win.imp().snapshot_view.update(&[]);
+                }
+            }
+        });
+    }
+
+    fn show_create_snapshot_dialog(&self) {
+        let win = self.downgrade();
+        crate::ui::create_snapshot_dialog::show_create_snapshot_dialog(
+            self.upcast_ref(),
+            move |name, description| {
+                let Some(win) = win.upgrade() else { return };
+                let uri = win.imp().connection_uri.borrow().clone();
+                let uuid = win.imp().selected_uuid.borrow().clone();
+                let Some(uuid) = uuid else { return };
+
+                let params = backend::types::CreateSnapshotParams { name, description };
+
+                let rx = spawn_blocking({
+                    let uuid = uuid.clone();
+                    move || backend::snapshot::create_snapshot(&uri, &uuid, &params)
+                });
+
+                let win2 = win.downgrade();
+                glib::spawn_future_local(async move {
+                    let Ok(result) = rx.recv().await else { return };
+                    let Some(win) = win2.upgrade() else { return };
+
+                    match result {
+                        Ok(()) => {
+                            win.show_toast("Snapshot created");
+                            win.load_snapshots(&uuid);
+                        }
+                        Err(e) => {
+                            win.show_toast(&format!("Failed to create snapshot: {e}"));
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    fn confirm_and_revert_snapshot(&self, snap_name: &str) {
+        let snap_name = snap_name.to_string();
+        let dialog = adw::MessageDialog::new(
+            Some(self),
+            Some("Revert to Snapshot?"),
+            Some(&format!(
+                "This will revert the VM to snapshot \"{snap_name}\". The current state will be lost."
+            )),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("confirm", "Revert");
+        dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let win = self.downgrade();
+        dialog.connect_response(None, move |_, response| {
+            if response != "confirm" {
+                return;
+            }
+            let Some(win) = win.upgrade() else { return };
+
+            let uri = win.imp().connection_uri.borrow().clone();
+            let uuid = win.imp().selected_uuid.borrow().clone();
+            let Some(uuid) = uuid else { return };
+            let snap_name = snap_name.clone();
+
+            let win2 = win.downgrade();
+            let uuid2 = uuid.clone();
+
+            let rx = spawn_blocking(move || {
+                backend::snapshot::revert_snapshot(&uri, &uuid, &snap_name)
+            });
+
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.recv().await else { return };
+                let Some(win) = win2.upgrade() else { return };
+
+                match result {
+                    Ok(()) => {
+                        win.show_toast("Reverted to snapshot");
+                        win.refresh_vm_list();
+                        win.load_vm_details(&uuid2);
+                    }
+                    Err(e) => {
+                        win.show_toast(&format!("Failed to revert: {e}"));
+                    }
+                }
+            });
+        });
+
+        dialog.present();
+    }
+
+    fn confirm_and_delete_snapshot(&self, snap_name: &str) {
+        let snap_name = snap_name.to_string();
+        let dialog = adw::MessageDialog::new(
+            Some(self),
+            Some("Delete Snapshot?"),
+            Some(&format!(
+                "This will permanently delete the snapshot \"{snap_name}\". This cannot be undone."
+            )),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("confirm", "Delete");
+        dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let win = self.downgrade();
+        dialog.connect_response(None, move |_, response| {
+            if response != "confirm" {
+                return;
+            }
+            let Some(win) = win.upgrade() else { return };
+
+            let uri = win.imp().connection_uri.borrow().clone();
+            let uuid = win.imp().selected_uuid.borrow().clone();
+            let Some(uuid) = uuid else { return };
+            let snap_name = snap_name.clone();
+
+            let win2 = win.downgrade();
+            let uuid2 = uuid.clone();
+
+            let rx = spawn_blocking(move || {
+                backend::snapshot::delete_snapshot(&uri, &uuid, &snap_name)
+            });
+
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.recv().await else { return };
+                let Some(win) = win2.upgrade() else { return };
+
+                match result {
+                    Ok(()) => {
+                        win.show_toast("Snapshot deleted");
+                        win.load_snapshots(&uuid2);
+                    }
+                    Err(e) => {
+                        win.show_toast(&format!("Failed to delete snapshot: {e}"));
+                    }
+                }
+            });
+        });
+
+        dialog.present();
     }
 
     fn handle_config_action(

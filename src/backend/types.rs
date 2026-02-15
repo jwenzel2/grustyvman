@@ -1,5 +1,69 @@
 use std::fmt;
 
+// --- Snapshot Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotState {
+    Running,
+    Paused,
+    Shutoff,
+    DiskSnapshot,
+    Other,
+}
+
+impl SnapshotState {
+    pub fn from_xml_str(s: &str) -> Self {
+        match s {
+            "running" => SnapshotState::Running,
+            "paused" => SnapshotState::Paused,
+            "shutoff" => SnapshotState::Shutoff,
+            "disk-snapshot" => SnapshotState::DiskSnapshot,
+            _ => SnapshotState::Other,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SnapshotState::Running => "Running",
+            SnapshotState::Paused => "Paused",
+            SnapshotState::Shutoff => "Shutoff",
+            SnapshotState::DiskSnapshot => "Disk Snapshot",
+            SnapshotState::Other => "Unknown",
+        }
+    }
+
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            SnapshotState::Running => "status-running",
+            SnapshotState::Paused => "status-paused",
+            SnapshotState::Shutoff => "status-shutoff",
+            SnapshotState::DiskSnapshot => "status-paused",
+            SnapshotState::Other => "status-shutoff",
+        }
+    }
+}
+
+impl fmt::Display for SnapshotState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotInfo {
+    pub name: String,
+    pub description: String,
+    pub state: SnapshotState,
+    pub creation_time: i64,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateSnapshotParams {
+    pub name: String,
+    pub description: String,
+}
+
 // --- Performance Monitoring Types ---
 
 pub struct RawPerfSample {
