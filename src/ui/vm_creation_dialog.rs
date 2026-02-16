@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::domain_xml::NewVmParams;
+use crate::backend::types::FirmwareType;
 
 pub fn show_creation_dialog(
     parent: &adw::ApplicationWindow,
@@ -39,6 +40,14 @@ pub fn show_creation_dialog(
     name_row.set_title("Name");
     name_row.set_text("new-vm");
     general_group.add(&name_row);
+
+    let firmware_labels: Vec<&str> = FirmwareType::ALL.iter().map(|f| f.label()).collect();
+    let firmware_list = gtk::StringList::new(&firmware_labels);
+    let firmware_row = adw::ComboRow::new();
+    firmware_row.set_title("Firmware");
+    firmware_row.set_model(Some(&firmware_list));
+    firmware_row.set_selected(0);
+    general_group.add(&firmware_row);
 
     content.append(&general_group);
 
@@ -147,12 +156,16 @@ pub fn show_creation_dialog(
 
     let dialog_ref = dialog.clone();
     create_btn.connect_clicked(move |_| {
+        let fw_idx = firmware_row.selected() as usize;
+        let firmware = FirmwareType::ALL.get(fw_idx).copied().unwrap_or(FirmwareType::Bios);
+
         let params = NewVmParams {
             name: name_row.text().to_string(),
             vcpus: cpu_row.value() as u32,
             memory_mib: memory_row.value() as u64,
             disk_size_gib: disk_row.value() as u64,
             iso_path: iso_path.borrow().clone(),
+            firmware,
         };
 
         if params.name.is_empty() {

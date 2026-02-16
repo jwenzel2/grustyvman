@@ -1,5 +1,6 @@
 use crate::backend::types::{
-    BootDevice, CpuMode, DiskInfo, DomainDetails, NetworkInfo, NewDiskParams, NewNetworkParams,
+    BootDevice, CpuMode, DiskInfo, DomainDetails, FirmwareType, NetworkInfo, NewDiskParams,
+    NewNetworkParams,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -12,6 +13,7 @@ pub struct NewVmParams {
     pub memory_mib: u64,
     pub disk_size_gib: u64,
     pub iso_path: Option<String>,
+    pub firmware: FirmwareType,
 }
 
 pub fn extract_interface_targets(xml: &str) -> Vec<String> {
@@ -60,18 +62,28 @@ pub fn extract_interface_targets(xml: &str) -> Vec<String> {
 pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
     let memory_kib = params.memory_mib * 1024;
 
+    let os_tag = match params.firmware {
+        FirmwareType::Efi => r#"<os firmware="efi">"#,
+        FirmwareType::Bios => "<os>",
+    };
+
+    let smm_feature = match params.firmware {
+        FirmwareType::Efi => "\n    <smm state=\"on\"/>",
+        FirmwareType::Bios => "",
+    };
+
     let xml = format!(
         r#"<domain type="kvm">
   <name>{name}</name>
   <memory unit="KiB">{memory_kib}</memory>
   <vcpu placement="static">{vcpus}</vcpu>
-  <os>
+  {os_tag}
     <type arch="x86_64" machine="q35">hvm</type>
     <boot dev="hd"/>
 {cdrom_boot}  </os>
   <features>
     <acpi/>
-    <apic/>
+    <apic/>{smm_feature}
   </features>
   <cpu mode="host-passthrough"/>
   <devices>
@@ -99,6 +111,8 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
         name = params.name,
         memory_kib = memory_kib,
         vcpus = params.vcpus,
+        os_tag = os_tag,
+        smm_feature = smm_feature,
         disk_path = disk_path,
         cdrom_boot = if params.iso_path.is_some() {
             "    <boot dev=\"cdrom\"/>\n"
@@ -170,6 +184,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         boot_order: Vec::new(),
         cpu_mode: CpuMode::HostPassthrough,
         cpu_model: None,
+        firmware: FirmwareType::Bios,
     };
 
     #[derive(Debug)]
@@ -217,6 +232,25 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     "vcpu" => context = Context::Vcpu,
                     "os" => {
                         in_os = true;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"firmware" {
+                                let val = String::from_utf8_lossy(&attr.value).to_string();
+                                if val == "efi" {
+                                    details.firmware = FirmwareType::Efi;
+                                }
+                            }
+                        }
+                    }
+                    "loader" if in_os => {
+                        // Legacy UEFI detection: <loader type="pflash">/usr/share/OVMF/OVMF_CODE.fd</loader>
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"type" {
+                                let val = String::from_utf8_lossy(&attr.value).to_string();
+                                if val == "pflash" {
+                                    details.firmware = FirmwareType::Efi;
+                                }
+                            }
+                        }
                     }
                     "type" if in_os && matches!(context, Context::None) => {
                         for attr in e.attributes().flatten() {
@@ -694,6 +728,158 @@ pub fn modify_boot_order(
             }
             Ok(ref event) => {
                 copy_event(&mut result, event);
+                if matches!(event, Event::Eof) {
+                    break;
+                }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn modify_firmware(
+    xml: &str,
+    firmware: FirmwareType,
+) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_os = false;
+    let mut in_features = false;
+    let mut found_smm = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "os" => {
+                        in_os = true;
+                        // Rewrite the <os> tag with or without firmware attribute
+                        match firmware {
+                            FirmwareType::Efi => {
+                                result.push_str(r#"<os firmware="efi">"#);
+                            }
+                            FirmwareType::Bios => {
+                                result.push_str("<os>");
+                            }
+                        }
+                        continue;
+                    }
+                    "loader" | "nvram" if in_os => {
+                        // Skip legacy loader/nvram elements (including their content)
+                        // We need to skip until the closing tag
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    "features" => {
+                        in_features = true;
+                        found_smm = false;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "smm" if in_features => {
+                        found_smm = true;
+                        if firmware == FirmwareType::Efi {
+                            // Keep/update SMM
+                            result.push_str(r#"<smm state="on">"#);
+                        }
+                        // If BIOS, skip the smm element
+                        if firmware == FirmwareType::Bios {
+                            let mut depth = 1u32;
+                            loop {
+                                match reader.read_event() {
+                                    Ok(Event::Start(_)) => depth += 1,
+                                    Ok(Event::End(_)) => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                    }
+                                    Ok(Event::Eof) => break,
+                                    _ => {}
+                                }
+                            }
+                            continue;
+                        } else {
+                            result.push('<');
+                            write_element(&mut result, e);
+                            result.push('>');
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "os" => {
+                        in_os = false;
+                        result.push_str("</os>");
+                    }
+                    "features" => {
+                        // Insert SMM if EFI and not already present
+                        if firmware == FirmwareType::Efi && !found_smm {
+                            result.push_str(r#"<smm state="on"/>"#);
+                        }
+                        in_features = false;
+                        result.push_str("</features>");
+                    }
+                    _ => {
+                        result.push_str(&format!("</{name}>"));
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "loader" | "nvram" if in_os => {
+                        // Skip legacy loader/nvram empty elements
+                        continue;
+                    }
+                    "smm" if in_features => {
+                        found_smm = true;
+                        if firmware == FirmwareType::Efi {
+                            result.push_str(r#"<smm state="on"/>"#);
+                        }
+                        // If BIOS, skip it
+                        continue;
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push_str("/>");
+                    }
+                }
+            }
+            Ok(ref event) => {
+                if in_os {
+                    // Check if this is text inside loader/nvram - those were already skipped
+                    copy_event(&mut result, event);
+                } else {
+                    copy_event(&mut result, event);
+                }
                 if matches!(event, Event::Eof) {
                     break;
                 }

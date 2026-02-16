@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::types::{
-    BootDevice, ConfigAction, ConfigChanges, CpuMode, DomainDetails, CPU_MODELS,
+    BootDevice, ConfigAction, ConfigChanges, CpuMode, DomainDetails, FirmwareType, CPU_MODELS,
 };
 
 pub fn show_config_dialog(
@@ -88,6 +88,21 @@ pub fn show_config_dialog(
 
     overview_page.add(&cpu_group);
 
+    // Firmware group
+    let firmware_group = adw::PreferencesGroup::new();
+    firmware_group.set_title("Firmware");
+
+    let firmware_labels: Vec<&str> = FirmwareType::ALL.iter().map(|f| f.label()).collect();
+    let firmware_list = gtk::StringList::new(&firmware_labels);
+    let firmware_row = adw::ComboRow::new();
+    firmware_row.set_title("Firmware Type");
+    firmware_row.set_model(Some(&firmware_list));
+    let current_fw_idx = FirmwareType::ALL.iter().position(|f| *f == details.firmware).unwrap_or(0);
+    firmware_row.set_selected(current_fw_idx as u32);
+    firmware_group.add(&firmware_row);
+
+    overview_page.add(&firmware_group);
+
     // General group (autostart)
     let general_group = adw::PreferencesGroup::new();
     general_group.set_title("General");
@@ -124,6 +139,9 @@ pub fn show_config_dialog(
             None
         };
 
+        let fw_idx = firmware_row.selected() as usize;
+        let firmware = FirmwareType::ALL.get(fw_idx).copied().unwrap_or(FirmwareType::Bios);
+
         let changes = ConfigChanges {
             vcpus: cpu_row.value() as u32,
             memory_mib: memory_row.value() as u64,
@@ -131,6 +149,7 @@ pub fn show_config_dialog(
             cpu_model: model,
             boot_order: boot_order.clone(),
             autostart: autostart_row.is_active(),
+            firmware,
         };
         on_action_apply(ConfigAction::ApplyGeneral(changes));
         window_ref.close();
@@ -269,6 +288,7 @@ pub fn show_config_dialog(
             cpu_model: None,
             boot_order: devices,
             autostart: false,
+            firmware: FirmwareType::Bios,
         }));
         window_ref.close();
     });

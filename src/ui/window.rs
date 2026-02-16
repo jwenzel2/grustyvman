@@ -8,8 +8,11 @@ use std::cell::RefCell;
 
 use crate::backend;
 use crate::backend::types::RawPerfSample;
+use crate::models::network_object::NetworkObject;
 use crate::models::pool_object::PoolObject;
 use crate::models::vm_object::VmObject;
+use crate::ui::network_details_view::NetworkDetailsView;
+use crate::ui::network_row::NetworkRow;
 use crate::ui::pool_details_view::PoolDetailsView;
 use crate::ui::pool_row::PoolRow;
 use crate::ui::vm_details_view::VmDetailsView;
@@ -67,6 +70,10 @@ mod imp {
         pub pool_details_view: PoolDetailsView,
         pub selected_pool_uuid: RefCell<Option<String>>,
         pub active_sidebar: RefCell<String>,
+        // Network state
+        pub network_list_store: gio::ListStore,
+        pub network_details_view: NetworkDetailsView,
+        pub selected_network_uuid: RefCell<Option<String>>,
     }
 
     #[allow(deprecated)]
@@ -101,6 +108,9 @@ mod imp {
                 pool_details_view: PoolDetailsView::new(),
                 selected_pool_uuid: RefCell::new(None),
                 active_sidebar: RefCell::new("vms".to_string()),
+                network_list_store: gio::ListStore::new::<NetworkObject>(),
+                network_details_view: NetworkDetailsView::new(),
+                selected_network_uuid: RefCell::new(None),
             }
         }
     }
@@ -194,8 +204,12 @@ impl Window {
         let btn_storage = gtk::ToggleButton::with_label("Storage");
         btn_storage.set_group(Some(&btn_vms));
         btn_storage.set_hexpand(true);
+        let btn_networks = gtk::ToggleButton::with_label("Networks");
+        btn_networks.set_group(Some(&btn_vms));
+        btn_networks.set_hexpand(true);
         toggle_box.append(&btn_vms);
         toggle_box.append(&btn_storage);
+        toggle_box.append(&btn_networks);
 
         // VM list
         let vm_list_box = vm_list_view::create_vm_list_box();
@@ -220,10 +234,26 @@ impl Window {
         pool_scrolled.set_vexpand(true);
         pool_scrolled.set_child(Some(&pool_list_box));
 
+        // Network list
+        let network_list_box = gtk::ListBox::new();
+        network_list_box.set_selection_mode(gtk::SelectionMode::Single);
+        network_list_box.add_css_class("navigation-sidebar");
+        network_list_box.bind_model(Some(&imp.network_list_store), |obj| {
+            let network = obj.downcast_ref::<NetworkObject>().unwrap();
+            let row = NetworkRow::new();
+            row.bind(network);
+            row.upcast()
+        });
+
+        let network_scrolled = gtk::ScrolledWindow::new();
+        network_scrolled.set_vexpand(true);
+        network_scrolled.set_child(Some(&network_list_box));
+
         // Sidebar stack
         let sidebar_stack = &imp.sidebar_stack;
         sidebar_stack.add_named(&vm_scrolled, Some("vms"));
         sidebar_stack.add_named(&pool_scrolled, Some("storage"));
+        sidebar_stack.add_named(&network_scrolled, Some("networks"));
         sidebar_stack.set_visible_child_name("vms");
 
         let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -353,6 +383,20 @@ impl Window {
         pool_empty_page.set_icon_name(Some("drive-harddisk-symbolic"));
         outer_stack.add_named(&pool_empty_page, Some("pool-empty"));
 
+        // Network content
+        let network_scrolled_content = gtk::ScrolledWindow::new();
+        let network_clamp = adw::Clamp::new();
+        network_clamp.set_maximum_size(800);
+        network_clamp.set_child(Some(&imp.network_details_view.container));
+        network_scrolled_content.set_child(Some(&network_clamp));
+        outer_stack.add_named(&network_scrolled_content, Some("network-content"));
+
+        let network_empty_page = adw::StatusPage::new();
+        network_empty_page.set_title("Select a Virtual Network");
+        network_empty_page.set_description(Some("Choose a network from the sidebar to view its details"));
+        network_empty_page.set_icon_name(Some("network-wired-symbolic"));
+        outer_stack.add_named(&network_empty_page, Some("network-empty"));
+
         outer_stack.set_visible_child_name("empty");
         content_toolbar.set_content(Some(outer_stack));
 
@@ -412,6 +456,27 @@ impl Window {
             }
         });
 
+        let win = self.downgrade();
+        let new_btn_ref = new_vm_btn.clone();
+        btn_networks.connect_toggled(move |btn| {
+            if btn.is_active() {
+                if let Some(win) = win.upgrade() {
+                    *win.imp().active_sidebar.borrow_mut() = "networks".to_string();
+                    win.imp().sidebar_stack.set_visible_child_name("networks");
+                    new_btn_ref.set_tooltip_text(Some("New Virtual Network"));
+                    new_btn_ref.set_icon_name("list-add-symbolic");
+                    win.stop_perf_sampling();
+                    if win.imp().selected_network_uuid.borrow().is_some() {
+                        win.imp().outer_stack.set_visible_child_name("network-content");
+                    } else {
+                        win.imp().outer_stack.set_visible_child_name("network-empty");
+                    }
+                    win.update_button_sensitivity_for_mode();
+                    win.refresh_network_list();
+                }
+            }
+        });
+
         // Connection dropdown
         let win = self.downgrade();
         conn_dropdown.connect_selected_notify(move |dropdown| {
@@ -422,12 +487,14 @@ impl Window {
                     *win.imp().connection_uri.borrow_mut() = uris[idx].to_string();
                     *win.imp().selected_uuid.borrow_mut() = None;
                     *win.imp().selected_pool_uuid.borrow_mut() = None;
+                    *win.imp().selected_network_uuid.borrow_mut() = None;
                     win.imp().outer_stack.set_visible_child_name("empty");
                     win.imp().view_switcher_title.set_title("");
                     win.imp().view_switcher_title.set_subtitle("");
                     win.update_button_sensitivity(None);
                     win.stop_perf_sampling();
                     win.imp().pool_list_store.remove_all();
+                    win.imp().network_list_store.remove_all();
                     win.refresh_vm_list();
                 }
             }
@@ -481,21 +548,45 @@ impl Window {
             }
         });
 
+        // Network list selection
+        let win = self.downgrade();
+        network_list_box.connect_row_selected(move |_, row| {
+            if let Some(win) = win.upgrade() {
+                if let Some(row) = row {
+                    let idx = row.index() as u32;
+                    if let Some(obj) = win.imp().network_list_store.item(idx) {
+                        let network = obj.downcast_ref::<NetworkObject>().unwrap();
+                        let uuid = network.uuid();
+                        *win.imp().selected_network_uuid.borrow_mut() = Some(uuid.clone());
+                        win.imp().view_switcher_title.set_title(&network.name());
+                        win.imp().view_switcher_title.set_subtitle(&network.state());
+                        win.load_network_details(&uuid);
+                    }
+                } else {
+                    *win.imp().selected_network_uuid.borrow_mut() = None;
+                    win.imp().outer_stack.set_visible_child_name("network-empty");
+                    win.imp().view_switcher_title.set_title("");
+                    win.imp().view_switcher_title.set_subtitle("");
+                }
+            }
+        });
+
         // New VM button
         let win = self.downgrade();
         new_vm_btn.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
                 let sidebar = win.imp().active_sidebar.borrow().clone();
-                if sidebar == "storage" {
-                    win.show_create_pool_dialog();
-                } else {
-                    win.show_create_vm_dialog();
+                match sidebar.as_str() {
+                    "storage" => win.show_create_pool_dialog(),
+                    "networks" => win.show_create_network_dialog(),
+                    _ => win.show_create_vm_dialog(),
                 }
             }
         });
 
         self.connect_action_buttons();
         self.connect_pool_action_buttons();
+        self.connect_network_action_buttons();
         self.connect_snapshot_callbacks();
 
         // Auto-refresh timer
@@ -504,8 +595,10 @@ impl Window {
             if let Some(win) = win.upgrade() {
                 win.refresh_vm_list();
                 let sidebar = win.imp().active_sidebar.borrow().clone();
-                if sidebar == "storage" {
-                    win.refresh_pool_list();
+                match sidebar.as_str() {
+                    "storage" => win.refresh_pool_list(),
+                    "networks" => win.refresh_network_list(),
+                    _ => {}
                 }
                 glib::ControlFlow::Continue
             } else {
@@ -532,7 +625,7 @@ impl Window {
 
     fn update_button_sensitivity_for_mode(&self) {
         let sidebar = self.imp().active_sidebar.borrow().clone();
-        if sidebar == "storage" {
+        if sidebar == "storage" || sidebar == "networks" {
             self.set_vm_buttons_visible(false);
         } else {
             self.set_vm_buttons_visible(true);
@@ -1371,6 +1464,256 @@ impl Window {
         dialog.present();
     }
 
+    // --- Network methods ---
+
+    fn connect_network_action_buttons(&self) {
+        let imp = self.imp();
+
+        let win = self.downgrade();
+        imp.network_details_view.btn_start.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.do_network_action("start");
+            }
+        });
+
+        let win = self.downgrade();
+        imp.network_details_view.btn_stop.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.do_network_action("stop");
+            }
+        });
+
+        let win = self.downgrade();
+        imp.network_details_view.btn_delete.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                let dialog = adw::MessageDialog::new(Some(&win), Some("Delete Network?"), Some("This will undefine the virtual network."));
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("confirm", "Delete");
+                dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
+
+                let win2 = win.downgrade();
+                dialog.connect_response(None, move |_, response| {
+                    if response == "confirm" {
+                        if let Some(win) = win2.upgrade() {
+                            win.do_network_action("delete");
+                        }
+                    }
+                });
+                dialog.present();
+            }
+        });
+
+        let win = self.downgrade();
+        imp.network_details_view.set_on_autostart(move |enabled| {
+            if let Some(win) = win.upgrade() {
+                win.set_network_autostart(enabled);
+            }
+        });
+    }
+
+    fn refresh_network_list(&self) {
+        let uri = self.imp().connection_uri.borrow().clone();
+        let win = self.downgrade();
+
+        let rx = spawn_blocking(move || backend::network::list_all_networks(&uri));
+
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+
+            match result {
+                Ok(networks) => {
+                    win.update_network_list(&networks);
+                }
+                Err(e) => {
+                    log::error!("Failed to list networks: {e}");
+                }
+            }
+        });
+    }
+
+    fn update_network_list(&self, networks: &[backend::types::VirtNetworkInfo]) {
+        let store = &self.imp().network_list_store;
+
+        let mut existing: std::collections::HashMap<String, (u32, NetworkObject)> =
+            std::collections::HashMap::new();
+        for i in 0..store.n_items() {
+            if let Some(obj) = store.item(i) {
+                let network = obj.downcast_ref::<NetworkObject>().unwrap();
+                existing.insert(network.uuid(), (i, network.clone()));
+            }
+        }
+
+        let new_uuids: std::collections::HashSet<String> =
+            networks.iter().map(|n| n.uuid.clone()).collect();
+
+        let mut to_remove: Vec<u32> = existing
+            .iter()
+            .filter(|(uuid, _)| !new_uuids.contains(*uuid))
+            .map(|(_, (idx, _))| *idx)
+            .collect();
+        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in to_remove {
+            store.remove(idx);
+        }
+
+        for net_info in networks {
+            if let Some((_, obj)) = existing.get(&net_info.uuid) {
+                obj.update_from(net_info);
+            } else {
+                store.append(&NetworkObject::new(net_info));
+            }
+        }
+    }
+
+    fn load_network_details(&self, uuid: &str) {
+        let uri = self.imp().connection_uri.borrow().clone();
+        let uuid = uuid.to_string();
+        let win = self.downgrade();
+
+        let rx = spawn_blocking({
+            let uri = uri.clone();
+            let uuid = uuid.clone();
+            move || {
+                let networks = backend::network::list_all_networks(&uri)?;
+                let net_info = networks.into_iter().find(|n| n.uuid == uuid);
+                Ok::<_, crate::error::AppError>(net_info)
+            }
+        });
+
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+
+            match result {
+                Ok(Some(net_info)) => {
+                    win.imp().network_details_view.update(&net_info);
+                    win.imp().outer_stack.set_visible_child_name("network-content");
+                    win.imp().view_switcher_title.set_title(&net_info.name);
+                    win.imp().view_switcher_title.set_subtitle(net_info.state.label());
+                }
+                Ok(None) => {
+                    win.show_toast("Network not found");
+                }
+                Err(e) => {
+                    win.show_toast(&format!("Failed to load network: {e}"));
+                }
+            }
+        });
+    }
+
+    fn do_network_action(&self, action: &str) {
+        let uuid = self.imp().selected_network_uuid.borrow().clone();
+        let uri = self.imp().connection_uri.borrow().clone();
+
+        let Some(uuid) = uuid else { return };
+
+        let win = self.downgrade();
+        let action = action.to_string();
+
+        let rx = spawn_blocking({
+            let uuid = uuid.clone();
+            let uri = uri.clone();
+            let action = action.clone();
+            move || match action.as_str() {
+                "start" => backend::network::start_network(&uri, &uuid),
+                "stop" => backend::network::stop_network(&uri, &uuid),
+                "delete" => backend::network::delete_network(&uri, &uuid),
+                _ => Ok(()),
+            }
+        });
+
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+
+            match result {
+                Ok(()) => {
+                    let msg = match action.as_str() {
+                        "start" => "Network started",
+                        "stop" => "Network stopped",
+                        "delete" => {
+                            *win.imp().selected_network_uuid.borrow_mut() = None;
+                            win.imp().outer_stack.set_visible_child_name("network-empty");
+                            win.imp().view_switcher_title.set_title("");
+                            win.imp().view_switcher_title.set_subtitle("");
+                            "Network deleted"
+                        }
+                        _ => "Done",
+                    };
+                    win.show_toast(msg);
+                    win.refresh_network_list();
+
+                    if !matches!(action.as_str(), "delete") {
+                        if let Some(uuid) = win.imp().selected_network_uuid.borrow().clone() {
+                            win.load_network_details(&uuid);
+                        }
+                    }
+                }
+                Err(e) => {
+                    win.show_toast(&format!("Error: {e}"));
+                }
+            }
+        });
+    }
+
+    fn set_network_autostart(&self, enabled: bool) {
+        let uri = self.imp().connection_uri.borrow().clone();
+        let network_uuid = self.imp().selected_network_uuid.borrow().clone();
+        let Some(network_uuid) = network_uuid else { return };
+
+        let win = self.downgrade();
+
+        let rx = spawn_blocking(move || {
+            backend::network::set_network_autostart(&uri, &network_uuid, enabled)
+        });
+
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+
+            match result {
+                Ok(()) => {
+                    let msg = if enabled { "Autostart enabled" } else { "Autostart disabled" };
+                    win.show_toast(msg);
+                }
+                Err(e) => {
+                    win.show_toast(&format!("Failed to set autostart: {e}"));
+                }
+            }
+        });
+    }
+
+    fn show_create_network_dialog(&self) {
+        let win = self.downgrade();
+        crate::ui::create_network_dialog::show_create_network_dialog(self.upcast_ref(), move |params| {
+            let Some(win) = win.upgrade() else { return };
+            let uri = win.imp().connection_uri.borrow().clone();
+
+            let rx = spawn_blocking(move || {
+                backend::network::create_network(&uri, &params)
+            });
+
+            let win2 = win.downgrade();
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.recv().await else { return };
+                let Some(win) = win2.upgrade() else { return };
+
+                match result {
+                    Ok(()) => {
+                        win.show_toast("Network created successfully");
+                        win.refresh_network_list();
+                    }
+                    Err(e) => {
+                        win.show_toast(&format!("Failed to create network: {e}"));
+                    }
+                }
+            });
+        });
+    }
+
     // --- VM dialogs ---
 
     fn show_create_vm_dialog(&self) {
@@ -1695,6 +2038,8 @@ impl Window {
                 )?;
 
                 let xml = backend::domain_xml::modify_boot_order(&xml, &changes.boot_order)?;
+
+                let xml = backend::domain_xml::modify_firmware(&xml, changes.firmware)?;
 
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())

@@ -13,6 +13,7 @@ pub struct VmDetailsView {
     vcpus_row: adw::ActionRow,
     memory_row: adw::ActionRow,
     os_row: adw::ActionRow,
+    firmware_row: adw::ActionRow,
     cpu_mode_row: adw::ActionRow,
     boot_group: adw::PreferencesGroup,
     disks_group: adw::PreferencesGroup,
@@ -72,6 +73,11 @@ impl VmDetailsView {
         os_row.set_activatable(false);
         resources_group.add(&os_row);
 
+        let firmware_row = adw::ActionRow::new();
+        firmware_row.set_title("Firmware");
+        firmware_row.set_activatable(false);
+        resources_group.add(&firmware_row);
+
         let cpu_mode_row = adw::ActionRow::new();
         cpu_mode_row.set_title("CPU Mode");
         cpu_mode_row.set_activatable(false);
@@ -103,6 +109,7 @@ impl VmDetailsView {
             vcpus_row,
             memory_row,
             os_row,
+            firmware_row,
             cpu_mode_row,
             boot_group,
             disks_group,
@@ -118,6 +125,7 @@ impl VmDetailsView {
         self.vcpus_row.set_subtitle(&details.vcpus.to_string());
         self.memory_row.set_subtitle(&format!("{} MiB", details.memory_kib / 1024));
         self.os_row.set_subtitle(&format!("{} ({})", details.os_type, details.arch));
+        self.firmware_row.set_subtitle(details.firmware.label());
 
         // CPU mode
         let cpu_subtitle = match details.cpu_mode {

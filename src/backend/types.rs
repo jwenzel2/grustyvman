@@ -240,7 +240,167 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+// --- Network Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkState {
+    Active,
+    Inactive,
+}
+
+impl NetworkState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            NetworkState::Active => "Active",
+            NetworkState::Inactive => "Inactive",
+        }
+    }
+
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            NetworkState::Active => "status-running",
+            NetworkState::Inactive => "status-shutoff",
+        }
+    }
+}
+
+impl fmt::Display for NetworkState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardMode {
+    Nat,
+    Route,
+    Isolated,
+    Bridge,
+    Open,
+}
+
+impl ForwardMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ForwardMode::Nat => "nat",
+            ForwardMode::Route => "route",
+            ForwardMode::Isolated => "isolated",
+            ForwardMode::Bridge => "bridge",
+            ForwardMode::Open => "open",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "nat" => ForwardMode::Nat,
+            "route" => ForwardMode::Route,
+            "bridge" => ForwardMode::Bridge,
+            "open" => ForwardMode::Open,
+            _ => ForwardMode::Isolated,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ForwardMode::Nat => "NAT",
+            ForwardMode::Route => "Routed",
+            ForwardMode::Isolated => "Isolated",
+            ForwardMode::Bridge => "Bridge",
+            ForwardMode::Open => "Open",
+        }
+    }
+
+    pub const ALL: &[ForwardMode] = &[
+        ForwardMode::Nat,
+        ForwardMode::Route,
+        ForwardMode::Isolated,
+        ForwardMode::Bridge,
+        ForwardMode::Open,
+    ];
+}
+
+impl fmt::Display for ForwardMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtNetworkInfo {
+    pub name: String,
+    pub uuid: String,
+    pub state: NetworkState,
+    pub active: bool,
+    pub persistent: bool,
+    pub autostart: bool,
+    pub forward_mode: ForwardMode,
+    pub bridge_name: Option<String>,
+    pub ip_address: Option<String>,
+    pub ip_netmask: Option<String>,
+    pub dhcp_start: Option<String>,
+    pub dhcp_end: Option<String>,
+}
+
+impl VirtNetworkInfo {
+    pub fn subtitle(&self) -> String {
+        if self.active {
+            format!("{} - {}", self.state, self.forward_mode)
+        } else {
+            self.state.to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkCreateParams {
+    pub name: String,
+    pub forward_mode: ForwardMode,
+    pub bridge_name: String,
+    pub ip_address: String,
+    pub ip_netmask: String,
+    pub dhcp_enabled: bool,
+    pub dhcp_start: String,
+    pub dhcp_end: String,
+}
+
 // --- VM Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareType {
+    Bios,
+    Efi,
+}
+
+impl FirmwareType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FirmwareType::Bios => "bios",
+            FirmwareType::Efi => "efi",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "efi" => FirmwareType::Efi,
+            _ => FirmwareType::Bios,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            FirmwareType::Bios => "BIOS",
+            FirmwareType::Efi => "UEFI",
+        }
+    }
+
+    pub const ALL: &[FirmwareType] = &[FirmwareType::Bios, FirmwareType::Efi];
+}
+
+impl fmt::Display for FirmwareType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootDevice {
@@ -381,6 +541,7 @@ pub struct ConfigChanges {
     pub cpu_model: Option<String>,
     pub boot_order: Vec<BootDevice>,
     pub autostart: bool,
+    pub firmware: FirmwareType,
 }
 
 #[derive(Debug, Clone)]
@@ -500,4 +661,5 @@ pub struct DomainDetails {
     pub boot_order: Vec<BootDevice>,
     pub cpu_mode: CpuMode,
     pub cpu_model: Option<String>,
+    pub firmware: FirmwareType,
 }
