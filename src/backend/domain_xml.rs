@@ -222,6 +222,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     let mut in_devices = false;
     let mut in_os = false;
     let mut in_cpu = false;
+    let mut in_video = false;
     let mut os_arch = String::new();
 
     loop {
@@ -350,6 +351,36 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                             }
                         }
                     }
+                    "model" if in_video && in_devices => {
+                        let mut vtype = VideoModel::None;
+                        let mut vram = None;
+                        let mut heads = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"type" => {
+                                    vtype = VideoModel::from_str(
+                                        &String::from_utf8_lossy(&attr.value),
+                                    );
+                                }
+                                b"vram" => {
+                                    vram = String::from_utf8_lossy(&attr.value)
+                                        .parse()
+                                        .ok();
+                                }
+                                b"heads" => {
+                                    heads = String::from_utf8_lossy(&attr.value)
+                                        .parse()
+                                        .ok();
+                                }
+                                _ => {}
+                            }
+                        }
+                        details.video = Some(VideoInfo {
+                            model: vtype,
+                            vram,
+                            heads,
+                        });
+                    }
                     "model" if matches!(context, Context::Interface(_)) => {
                         if let Context::Interface(ref mut ib) = context {
                             for attr in e.attributes().flatten() {
@@ -362,6 +393,52 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     }
                     "graphics" if in_devices => {
                         details.has_graphics = true;
+                        let mut gtype = GraphicsType::None;
+                        let mut port = None;
+                        let mut autoport = false;
+                        let mut listen_address = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"type" => {
+                                    gtype = GraphicsType::from_str(
+                                        &String::from_utf8_lossy(&attr.value),
+                                    );
+                                }
+                                b"port" => {
+                                    port = String::from_utf8_lossy(&attr.value)
+                                        .parse()
+                                        .ok();
+                                }
+                                b"autoport" => {
+                                    autoport = String::from_utf8_lossy(&attr.value) == "yes";
+                                }
+                                b"listen" => {
+                                    listen_address =
+                                        Some(String::from_utf8_lossy(&attr.value).to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                        details.graphics = Some(GraphicsInfo {
+                            graphics_type: gtype,
+                            port,
+                            autoport,
+                            listen_address,
+                        });
+                    }
+                    "video" if in_devices => {
+                        in_video = true;
+                    }
+                    "sound" if in_devices => {
+                        let mut smodel = SoundModel::None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"model" {
+                                smodel = SoundModel::from_str(
+                                    &String::from_utf8_lossy(&attr.value),
+                                );
+                            }
+                        }
+                        details.sound = Some(SoundInfo { model: smodel });
                     }
                     _ => {}
                 }
@@ -409,6 +486,9 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     "devices" => {
                         in_devices = false;
                     }
+                    "video" => {
+                        in_video = false;
+                    }
                     "disk" => {
                         if let Context::Disk(db) = std::mem::replace(&mut context, Context::None) {
                             details.disks.push(DiskInfo {
@@ -447,18 +527,227 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
 }
 
 pub fn modify_graphics(xml: &str, graphics_type: GraphicsType) -> Result<String, AppError> {
-    let _ = (xml, graphics_type);
-    todo!("Implemented in commit 2")
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+    let mut skip_graphics = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "graphics" if in_devices => {
+                        skip_graphics = true;
+                        // Skip this element and its children
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "graphics" && in_devices {
+                    // Skip existing empty graphics element
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    // Insert new graphics before </devices>
+                    if graphics_type != GraphicsType::None {
+                        result.push_str(&format!(
+                            r#"<graphics type="{}" autoport="yes"/>"#,
+                            graphics_type.as_str()
+                        ));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    let _ = skip_graphics;
+    Ok(result)
 }
 
 pub fn modify_video(xml: &str, video_model: VideoModel) -> Result<String, AppError> {
-    let _ = (xml, video_model);
-    todo!("Implemented in commit 2")
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "video" if in_devices => {
+                        // Skip this element and its children
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "video" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    if video_model != VideoModel::None {
+                        result.push_str(&format!(
+                            r#"<video><model type="{}"/></video>"#,
+                            video_model.as_str()
+                        ));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn modify_sound(xml: &str, sound_model: SoundModel) -> Result<String, AppError> {
-    let _ = (xml, sound_model);
-    todo!("Implemented in commit 2")
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "sound" if in_devices => {
+                        // Skip this element and its children
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "sound" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    if sound_model != SoundModel::None {
+                        result.push_str(&format!(
+                            r#"<sound model="{}"/>"#,
+                            sound_model.as_str()
+                        ));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn modify_domain_xml(xml: &str, new_vcpus: u32, new_memory_mib: u64) -> Result<String, AppError> {
