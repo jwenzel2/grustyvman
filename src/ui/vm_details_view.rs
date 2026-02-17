@@ -18,6 +18,7 @@ pub struct VmDetailsView {
     boot_group: adw::PreferencesGroup,
     disks_group: adw::PreferencesGroup,
     networks_group: adw::PreferencesGroup,
+    display_group: adw::PreferencesGroup,
 }
 
 impl VmDetailsView {
@@ -100,6 +101,11 @@ impl VmDetailsView {
         networks_group.set_title("Network");
         container.append(&networks_group);
 
+        // Display & Media group
+        let display_group = adw::PreferencesGroup::new();
+        display_group.set_title("Display & Media");
+        container.append(&display_group);
+
         Self {
             container,
             status_row,
@@ -114,6 +120,7 @@ impl VmDetailsView {
             boot_group,
             disks_group,
             networks_group,
+            display_group,
         }
     }
 
@@ -195,6 +202,52 @@ impl VmDetailsView {
                 row.set_activatable(false);
                 self.networks_group.add(&row);
             }
+        }
+
+        // Display & Media
+        clear_pref_group(&self.display_group);
+
+        if let Some(ref gfx) = details.graphics {
+            let row = adw::ActionRow::new();
+            row.set_title("Graphics");
+            let port_str = gfx.port.map(|p| format!(" (port {})", p)).unwrap_or_default();
+            row.set_subtitle(&format!("{}{}", gfx.graphics_type.label(), port_str));
+            row.set_activatable(false);
+            self.display_group.add(&row);
+        } else {
+            let row = adw::ActionRow::new();
+            row.set_title("Graphics");
+            row.set_subtitle("None");
+            row.set_activatable(false);
+            self.display_group.add(&row);
+        }
+
+        if let Some(ref vid) = details.video {
+            let row = adw::ActionRow::new();
+            row.set_title("Video");
+            row.set_subtitle(vid.model.label());
+            row.set_activatable(false);
+            self.display_group.add(&row);
+        } else {
+            let row = adw::ActionRow::new();
+            row.set_title("Video");
+            row.set_subtitle("None");
+            row.set_activatable(false);
+            self.display_group.add(&row);
+        }
+
+        if let Some(ref snd) = details.sound {
+            let row = adw::ActionRow::new();
+            row.set_title("Sound");
+            row.set_subtitle(snd.model.label());
+            row.set_activatable(false);
+            self.display_group.add(&row);
+        } else {
+            let row = adw::ActionRow::new();
+            row.set_title("Sound");
+            row.set_subtitle("None");
+            row.set_activatable(false);
+            self.display_group.add(&row);
         }
     }
 }

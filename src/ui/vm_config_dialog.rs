@@ -6,7 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::types::{
-    BootDevice, ConfigAction, ConfigChanges, CpuMode, DomainDetails, FirmwareType, CPU_MODELS,
+    BootDevice, ConfigAction, ConfigChanges, CpuMode, DomainDetails, FirmwareType, GraphicsType,
+    SoundModel, VideoModel, CPU_MODELS,
 };
 
 pub fn show_config_dialog(
@@ -409,6 +410,98 @@ pub fn show_config_dialog(
     devices_page.add(&networks_group);
 
     window.add(&devices_page);
+
+    // --- Display page ---
+    let display_page = adw::PreferencesPage::new();
+    display_page.set_title("Display");
+    display_page.set_icon_name(Some("video-display-symbolic"));
+
+    // Graphics group
+    let graphics_group = adw::PreferencesGroup::new();
+    graphics_group.set_title("Graphics");
+
+    let graphics_labels: Vec<&str> = GraphicsType::ALL.iter().map(|g| g.label()).collect();
+    let graphics_list = gtk::StringList::new(&graphics_labels);
+    let graphics_row = adw::ComboRow::new();
+    graphics_row.set_title("Graphics Type");
+    graphics_row.set_model(Some(&graphics_list));
+    let current_gfx_idx = details
+        .graphics
+        .as_ref()
+        .and_then(|g| GraphicsType::ALL.iter().position(|t| *t == g.graphics_type))
+        .unwrap_or(GraphicsType::ALL.len() - 1); // default to None
+    graphics_row.set_selected(current_gfx_idx as u32);
+    graphics_group.add(&graphics_row);
+
+    display_page.add(&graphics_group);
+
+    // Video group
+    let video_group = adw::PreferencesGroup::new();
+    video_group.set_title("Video");
+
+    let video_labels: Vec<&str> = VideoModel::ALL.iter().map(|v| v.label()).collect();
+    let video_list = gtk::StringList::new(&video_labels);
+    let video_row = adw::ComboRow::new();
+    video_row.set_title("Video Model");
+    video_row.set_model(Some(&video_list));
+    let current_vid_idx = details
+        .video
+        .as_ref()
+        .and_then(|v| VideoModel::ALL.iter().position(|m| *m == v.model))
+        .unwrap_or(VideoModel::ALL.len() - 1);
+    video_row.set_selected(current_vid_idx as u32);
+    video_group.add(&video_row);
+
+    display_page.add(&video_group);
+
+    // Sound group
+    let sound_group = adw::PreferencesGroup::new();
+    sound_group.set_title("Sound");
+
+    let sound_labels: Vec<&str> = SoundModel::ALL.iter().map(|s| s.label()).collect();
+    let sound_list = gtk::StringList::new(&sound_labels);
+    let sound_row = adw::ComboRow::new();
+    sound_row.set_title("Sound Model");
+    sound_row.set_model(Some(&sound_list));
+    let current_snd_idx = details
+        .sound
+        .as_ref()
+        .and_then(|s| SoundModel::ALL.iter().position(|m| *m == s.model))
+        .unwrap_or(SoundModel::ALL.len() - 1);
+    sound_row.set_selected(current_snd_idx as u32);
+    sound_group.add(&sound_row);
+
+    display_page.add(&sound_group);
+
+    // Apply button
+    let display_apply_group = adw::PreferencesGroup::new();
+    let display_apply_btn = gtk::Button::with_label("Apply Display Settings");
+    display_apply_btn.add_css_class("suggested-action");
+    display_apply_btn.add_css_class("pill");
+    display_apply_btn.set_halign(gtk::Align::Center);
+    display_apply_btn.set_margin_top(12);
+
+    let on_action_display = on_action.clone();
+    let window_ref = window.clone();
+    display_apply_btn.connect_clicked(move |_| {
+        let gfx_idx = graphics_row.selected() as usize;
+        let gfx = GraphicsType::ALL.get(gfx_idx).copied().unwrap_or(GraphicsType::None);
+
+        let vid_idx = video_row.selected() as usize;
+        let vid = VideoModel::ALL.get(vid_idx).copied().unwrap_or(VideoModel::None);
+
+        let snd_idx = sound_row.selected() as usize;
+        let snd = SoundModel::ALL.get(snd_idx).copied().unwrap_or(SoundModel::None);
+
+        on_action_display(ConfigAction::ModifyGraphics(gfx));
+        on_action_display(ConfigAction::ModifyVideo(vid));
+        on_action_display(ConfigAction::ModifySound(snd));
+        window_ref.close();
+    });
+    display_apply_group.add(&display_apply_btn);
+    display_page.add(&display_apply_group);
+
+    window.add(&display_page);
 
     window.present();
 }
