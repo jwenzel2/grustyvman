@@ -2075,6 +2075,24 @@ impl Window {
                 backend::domain::set_autostart(uri, uuid, enabled)?;
                 Ok(())
             }
+            ConfigAction::ModifyGraphics(gtype) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_graphics(&xml, gtype)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifyVideo(vmodel) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_video(&xml, vmodel)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifySound(smodel) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_sound(&xml, smodel)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
         }
     }
 }

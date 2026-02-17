@@ -363,6 +363,205 @@ pub struct NetworkCreateParams {
     pub dhcp_end: String,
 }
 
+// --- Host Info Types ---
+
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    pub hostname: String,
+    pub uri: String,
+    pub libvirt_version: String,
+    pub hypervisor_version: String,
+    pub cpu_model: String,
+    pub cpu_cores: u32,
+    pub cpu_threads: u32,
+    pub cpu_mhz: u32,
+    pub cpu_sockets: u32,
+    pub cpu_nodes: u32,
+    pub memory_kib: u64,
+}
+
+// --- Graphics/Video/Sound Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsType {
+    Spice,
+    Vnc,
+    None,
+}
+
+impl GraphicsType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GraphicsType::Spice => "spice",
+            GraphicsType::Vnc => "vnc",
+            GraphicsType::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "spice" => GraphicsType::Spice,
+            "vnc" => GraphicsType::Vnc,
+            _ => GraphicsType::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            GraphicsType::Spice => "SPICE",
+            GraphicsType::Vnc => "VNC",
+            GraphicsType::None => "None",
+        }
+    }
+
+    pub const ALL: &[GraphicsType] = &[
+        GraphicsType::Spice,
+        GraphicsType::Vnc,
+        GraphicsType::None,
+    ];
+}
+
+impl fmt::Display for GraphicsType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphicsInfo {
+    pub graphics_type: GraphicsType,
+    pub port: Option<i32>,
+    pub autoport: bool,
+    pub listen_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoModel {
+    Virtio,
+    Qxl,
+    Vga,
+    Bochs,
+    Ramfb,
+    None,
+}
+
+impl VideoModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VideoModel::Virtio => "virtio",
+            VideoModel::Qxl => "qxl",
+            VideoModel::Vga => "vga",
+            VideoModel::Bochs => "bochs",
+            VideoModel::Ramfb => "ramfb",
+            VideoModel::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "virtio" => VideoModel::Virtio,
+            "qxl" => VideoModel::Qxl,
+            "vga" => VideoModel::Vga,
+            "bochs" => VideoModel::Bochs,
+            "ramfb" => VideoModel::Ramfb,
+            _ => VideoModel::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            VideoModel::Virtio => "Virtio",
+            VideoModel::Qxl => "QXL",
+            VideoModel::Vga => "VGA",
+            VideoModel::Bochs => "Bochs",
+            VideoModel::Ramfb => "Ramfb",
+            VideoModel::None => "None",
+        }
+    }
+
+    pub const ALL: &[VideoModel] = &[
+        VideoModel::Virtio,
+        VideoModel::Qxl,
+        VideoModel::Vga,
+        VideoModel::Bochs,
+        VideoModel::Ramfb,
+        VideoModel::None,
+    ];
+}
+
+impl fmt::Display for VideoModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoInfo {
+    pub model: VideoModel,
+    pub vram: Option<u32>,
+    pub heads: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundModel {
+    Ich9,
+    Ich6,
+    Ac97,
+    Usb,
+    None,
+}
+
+impl SoundModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SoundModel::Ich9 => "ich9",
+            SoundModel::Ich6 => "ich6",
+            SoundModel::Ac97 => "ac97",
+            SoundModel::Usb => "usb",
+            SoundModel::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "ich9" => SoundModel::Ich9,
+            "ich6" => SoundModel::Ich6,
+            "ac97" => SoundModel::Ac97,
+            "usb" => SoundModel::Usb,
+            _ => SoundModel::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SoundModel::Ich9 => "ICH9",
+            SoundModel::Ich6 => "ICH6",
+            SoundModel::Ac97 => "AC97",
+            SoundModel::Usb => "USB",
+            SoundModel::None => "None",
+        }
+    }
+
+    pub const ALL: &[SoundModel] = &[
+        SoundModel::Ich9,
+        SoundModel::Ich6,
+        SoundModel::Ac97,
+        SoundModel::Usb,
+        SoundModel::None,
+    ];
+}
+
+impl fmt::Display for SoundModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SoundInfo {
+    pub model: SoundModel,
+}
+
 // --- VM Types ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +751,9 @@ pub enum ConfigAction {
     AddNetwork(NewNetworkParams),
     RemoveNetwork(String),
     SetAutostart(bool),
+    ModifyGraphics(GraphicsType),
+    ModifyVideo(VideoModel),
+    ModifySound(SoundModel),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -662,4 +864,7 @@ pub struct DomainDetails {
     pub cpu_mode: CpuMode,
     pub cpu_model: Option<String>,
     pub firmware: FirmwareType,
+    pub graphics: Option<GraphicsInfo>,
+    pub video: Option<VideoInfo>,
+    pub sound: Option<SoundInfo>,
 }

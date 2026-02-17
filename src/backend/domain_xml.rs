@@ -1,6 +1,6 @@
 use crate::backend::types::{
-    BootDevice, CpuMode, DiskInfo, DomainDetails, FirmwareType, NetworkInfo, NewDiskParams,
-    NewNetworkParams,
+    BootDevice, CpuMode, DiskInfo, DomainDetails, FirmwareType, GraphicsInfo, GraphicsType,
+    NetworkInfo, NewDiskParams, NewNetworkParams, SoundInfo, SoundModel, VideoInfo, VideoModel,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -185,6 +185,9 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         cpu_mode: CpuMode::HostPassthrough,
         cpu_model: None,
         firmware: FirmwareType::Bios,
+        graphics: None,
+        video: None,
+        sound: None,
     };
 
     #[derive(Debug)]
@@ -441,6 +444,21 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     }
 
     Ok(details)
+}
+
+pub fn modify_graphics(xml: &str, graphics_type: GraphicsType) -> Result<String, AppError> {
+    let _ = (xml, graphics_type);
+    todo!("Implemented in commit 2")
+}
+
+pub fn modify_video(xml: &str, video_model: VideoModel) -> Result<String, AppError> {
+    let _ = (xml, video_model);
+    todo!("Implemented in commit 2")
+}
+
+pub fn modify_sound(xml: &str, sound_model: SoundModel) -> Result<String, AppError> {
+    let _ = (xml, sound_model);
+    todo!("Implemented in commit 2")
 }
 
 pub fn modify_domain_xml(xml: &str, new_vcpus: u32, new_memory_mib: u64) -> Result<String, AppError> {
