@@ -19,6 +19,7 @@ use crate::ui::host_details_view::HostDetailsView;
 use crate::ui::vm_details_view::VmDetailsView;
 use crate::ui::vm_performance_view::VmPerformanceView;
 use crate::ui::vm_snapshot_view::VmSnapshotView;
+use crate::ui::vm_xml_editor::VmXmlEditor;
 use crate::ui::vm_list_view;
 
 fn spawn_blocking<F, T>(f: F) -> async_channel::Receiver<T>
@@ -77,6 +78,8 @@ mod imp {
         pub selected_network_uuid: RefCell<Option<String>>,
         // Host details
         pub host_details_view: HostDetailsView,
+        // XML editor
+        pub xml_editor: VmXmlEditor,
     }
 
     #[allow(deprecated)]
@@ -115,6 +118,7 @@ mod imp {
                 network_details_view: NetworkDetailsView::new(),
                 selected_network_uuid: RefCell::new(None),
                 host_details_view: HostDetailsView::new(),
+                xml_editor: VmXmlEditor::new(),
             }
         }
     }
@@ -366,6 +370,9 @@ impl Window {
 
         let snap_page = view_stack.add_titled(&imp.snapshot_view.container, Some("snapshots"), "Snapshots");
         snap_page.set_icon_name(Some("camera-photo-symbolic"));
+
+        let xml_page = view_stack.add_titled(&imp.xml_editor.container, Some("xml"), "XML");
+        xml_page.set_icon_name(Some("accessories-text-editor-symbolic"));
 
         // --- Pool content ---
         let pool_scrolled = gtk::ScrolledWindow::new();
@@ -647,6 +654,7 @@ impl Window {
         self.connect_pool_action_buttons();
         self.connect_network_action_buttons();
         self.connect_snapshot_callbacks();
+        self.connect_xml_editor_callback();
 
         // Auto-refresh timer
         let win = self.downgrade();
@@ -1099,7 +1107,7 @@ impl Window {
                 let autostart = backend::domain::get_autostart(&uri, &uuid)?;
                 let vms = backend::connection::list_all_vms(&uri)?;
                 let vm_info = vms.into_iter().find(|v| v.uuid == uuid);
-                Ok::<_, crate::error::AppError>((details, vm_info, autostart, disk_targets, iface_targets))
+                Ok::<_, crate::error::AppError>((details, vm_info, autostart, disk_targets, iface_targets, xml))
             }
         });
 
@@ -1108,7 +1116,7 @@ impl Window {
             let Some(win) = win.upgrade() else { return };
 
             match result {
-                Ok((details, vm_info, autostart, disk_targets, iface_targets)) => {
+                Ok((details, vm_info, autostart, disk_targets, iface_targets, raw_xml)) => {
                     let state_label = vm_info
                         .as_ref()
                         .map(|v| v.state.label())
@@ -1116,6 +1124,7 @@ impl Window {
                     let domain_id = vm_info.as_ref().and_then(|v| v.id);
 
                     win.imp().details_view.update(&details, state_label, domain_id, autostart);
+                    win.imp().xml_editor.set_xml(&raw_xml);
                     win.imp().outer_stack.set_visible_child_name("vm-content");
 
                     let uuid_for_snap = win.imp().selected_uuid.borrow().clone();
@@ -1904,6 +1913,39 @@ impl Window {
     }
 
     // --- Snapshot methods ---
+
+    fn connect_xml_editor_callback(&self) {
+        let win = self.downgrade();
+        self.imp().xml_editor.set_on_apply(move |xml_text| {
+            let Some(win) = win.upgrade() else { return };
+            let uri = win.imp().connection_uri.borrow().clone();
+            let uuid = win.imp().selected_uuid.borrow().clone();
+            let Some(uuid) = uuid else { return };
+
+            let win2 = win.downgrade();
+            let uuid2 = uuid.clone();
+
+            let rx = spawn_blocking(move || {
+                backend::domain::update_domain_xml(&uri, &xml_text)
+            });
+
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.recv().await else { return };
+                let Some(win) = win2.upgrade() else { return };
+
+                match result {
+                    Ok(()) => {
+                        win.show_toast("XML updated successfully");
+                        win.refresh_vm_list();
+                        win.load_vm_details(&uuid2);
+                    }
+                    Err(e) => {
+                        win.show_toast(&format!("Failed to update XML: {e}"));
+                    }
+                }
+            });
+        });
+    }
 
     fn connect_snapshot_callbacks(&self) {
         let win = self.downgrade();

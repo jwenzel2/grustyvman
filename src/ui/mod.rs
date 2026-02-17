@@ -17,4 +17,5 @@ pub mod vm_list_view;
 pub mod vm_performance_view;
 pub mod vm_row;
 pub mod vm_snapshot_view;
+pub mod vm_xml_editor;
 pub mod window;
