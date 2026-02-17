@@ -19,6 +19,7 @@ pub struct VmDetailsView {
     disks_group: adw::PreferencesGroup,
     networks_group: adw::PreferencesGroup,
     display_group: adw::PreferencesGroup,
+    cpu_pinning_group: adw::PreferencesGroup,
 }
 
 impl VmDetailsView {
@@ -106,6 +107,11 @@ impl VmDetailsView {
         display_group.set_title("Display &amp; Media");
         container.append(&display_group);
 
+        // CPU Pinning group
+        let cpu_pinning_group = adw::PreferencesGroup::new();
+        cpu_pinning_group.set_title("CPU Pinning");
+        container.append(&cpu_pinning_group);
+
         Self {
             container,
             status_row,
@@ -121,6 +127,7 @@ impl VmDetailsView {
             disks_group,
             networks_group,
             display_group,
+            cpu_pinning_group,
         }
     }
 
@@ -248,6 +255,30 @@ impl VmDetailsView {
             row.set_subtitle("None");
             row.set_activatable(false);
             self.display_group.add(&row);
+        }
+
+        // CPU Pinning
+        clear_pref_group(&self.cpu_pinning_group);
+        if details.cpu_tune.vcpu_pins.is_empty() && details.cpu_tune.emulatorpin.is_none() {
+            let row = adw::ActionRow::new();
+            row.set_title("No CPU pinning configured");
+            row.set_activatable(false);
+            self.cpu_pinning_group.add(&row);
+        } else {
+            for pin in &details.cpu_tune.vcpu_pins {
+                let row = adw::ActionRow::new();
+                row.set_title(&format!("vCPU {}", pin.vcpu));
+                row.set_subtitle(&format!("→ cores {}", pin.cpuset));
+                row.set_activatable(false);
+                self.cpu_pinning_group.add(&row);
+            }
+            if let Some(ref cpuset) = details.cpu_tune.emulatorpin {
+                let row = adw::ActionRow::new();
+                row.set_title("Emulator Thread");
+                row.set_subtitle(&format!("→ cores {cpuset}"));
+                row.set_activatable(false);
+                self.cpu_pinning_group.add(&row);
+            }
         }
     }
 }

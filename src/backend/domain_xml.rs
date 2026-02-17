@@ -1,6 +1,7 @@
 use crate::backend::types::{
-    BootDevice, CpuMode, DiskInfo, DomainDetails, FirmwareType, GraphicsInfo, GraphicsType,
-    NetworkInfo, NewDiskParams, NewNetworkParams, SoundInfo, SoundModel, VideoInfo, VideoModel,
+    BootDevice, CpuMode, CpuTune, DiskInfo, DomainDetails, FirmwareType, GraphicsInfo,
+    GraphicsType, NetworkInfo, NewDiskParams, NewNetworkParams, SoundInfo, SoundModel, VcpuPin,
+    VideoInfo, VideoModel,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -188,6 +189,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         graphics: None,
         video: None,
         sound: None,
+        cpu_tune: CpuTune::default(),
     };
 
     #[derive(Debug)]
@@ -223,6 +225,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     let mut in_os = false;
     let mut in_cpu = false;
     let mut in_video = false;
+    let mut in_cputune = false;
     let mut os_arch = String::new();
 
     loop {
@@ -285,6 +288,38 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     }
                     "model" if in_cpu && !in_devices => {
                         context = Context::CpuModel;
+                    }
+                    "cputune" => {
+                        in_cputune = true;
+                    }
+                    "vcpupin" if in_cputune => {
+                        let mut vcpu = 0u32;
+                        let mut cpuset = String::new();
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"vcpu" => {
+                                    vcpu = String::from_utf8_lossy(&attr.value)
+                                        .parse()
+                                        .unwrap_or(0);
+                                }
+                                b"cpuset" => {
+                                    cpuset =
+                                        String::from_utf8_lossy(&attr.value).to_string();
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !cpuset.is_empty() {
+                            details.cpu_tune.vcpu_pins.push(VcpuPin { vcpu, cpuset });
+                        }
+                    }
+                    "emulatorpin" if in_cputune => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"cpuset" {
+                                details.cpu_tune.emulatorpin =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
                     }
                     "devices" => {
                         in_devices = true;
@@ -482,6 +517,9 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     }
                     "cpu" => {
                         in_cpu = false;
+                    }
+                    "cputune" => {
+                        in_cputune = false;
                     }
                     "devices" => {
                         in_devices = false;
@@ -1398,6 +1436,467 @@ pub fn add_network_device(xml: &str, params: &NewNetworkParams) -> Result<String
     }
 
     Ok(result)
+}
+
+pub fn eject_cdrom(xml: &str, target_dev: &str) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    // Buffer the entire disk element, then decide whether to strip <source>
+    let mut disk_buffer = String::new();
+    let mut disk_depth = 0u32;
+    let mut in_disk = false;
+    let mut is_cdrom = false;
+    let mut found_target = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_disk {
+                    disk_depth += 1;
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                if dev == target_dev {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    // Skip <source> children if this is our target cdrom
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push('>');
+                    continue;
+                }
+
+                if name == "disk" {
+                    in_disk = true;
+                    disk_depth = 1;
+                    disk_buffer.clear();
+                    is_cdrom = false;
+                    found_target = false;
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"device" {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            if val == "cdrom" {
+                                is_cdrom = true;
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push('>');
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_disk {
+                    disk_depth -= 1;
+                    disk_buffer.push_str(&format!("</{name}>"));
+                    if disk_depth == 0 {
+                        in_disk = false;
+                        if is_cdrom && found_target {
+                            // Re-emit the disk but strip <source .../> elements
+                            result.push_str(&strip_source_from_disk(&disk_buffer));
+                        } else {
+                            result.push_str(&disk_buffer);
+                        }
+                        disk_buffer.clear();
+                    }
+                    continue;
+                }
+
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_disk {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                if dev == target_dev {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push_str("/>");
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_disk {
+                    disk_buffer.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+fn strip_source_from_disk(disk_xml: &str) -> String {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(disk_xml);
+    reader.config_mut().trim_text(false);
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "source" {
+                    // Skip <source>...</source>
+                    let mut depth = 1u32;
+                    loop {
+                        match reader.read_event() {
+                            Ok(Event::Start(_)) => depth += 1,
+                            Ok(Event::End(_)) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            Ok(Event::Eof) => break,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "source" {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(_) => break,
+        }
+    }
+
+    result
+}
+
+pub fn change_cdrom_media(
+    xml: &str,
+    target_dev: &str,
+    iso_path: &str,
+) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut disk_buffer = String::new();
+    let mut disk_depth = 0u32;
+    let mut in_disk = false;
+    let mut is_cdrom = false;
+    let mut found_target = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_disk {
+                    disk_depth += 1;
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                if dev == target_dev {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push('>');
+                    continue;
+                }
+
+                if name == "disk" {
+                    in_disk = true;
+                    disk_depth = 1;
+                    disk_buffer.clear();
+                    is_cdrom = false;
+                    found_target = false;
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"device" {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            if val == "cdrom" {
+                                is_cdrom = true;
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push('>');
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_disk {
+                    disk_depth -= 1;
+                    disk_buffer.push_str(&format!("</{name}>"));
+                    if disk_depth == 0 {
+                        in_disk = false;
+                        if is_cdrom && found_target {
+                            result.push_str(&replace_source_in_disk(&disk_buffer, iso_path));
+                        } else {
+                            result.push_str(&disk_buffer);
+                        }
+                        disk_buffer.clear();
+                    }
+                    continue;
+                }
+
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_disk {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                if dev == target_dev {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push_str("/>");
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_disk {
+                    disk_buffer.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+fn replace_source_in_disk(disk_xml: &str, iso_path: &str) -> String {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(disk_xml);
+    reader.config_mut().trim_text(false);
+
+    let mut found_source = false;
+    let new_source = format!(r#"<source file="{iso_path}"/>"#);
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "source" {
+                    found_source = true;
+                    result.push_str(&new_source);
+                    // Skip <source>...</source>
+                    let mut depth = 1u32;
+                    loop {
+                        match reader.read_event() {
+                            Ok(Event::Start(_)) => depth += 1,
+                            Ok(Event::End(_)) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            Ok(Event::Eof) => break,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+                if name == "target" && !found_source {
+                    // Insert source before target
+                    found_source = true;
+                    result.push_str(&new_source);
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "source" {
+                    found_source = true;
+                    result.push_str(&new_source);
+                    continue;
+                }
+                if name == "target" && !found_source {
+                    found_source = true;
+                    result.push_str(&new_source);
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(_) => break,
+        }
+    }
+
+    result
+}
+
+pub fn modify_cputune(xml: &str, cpu_tune: &CpuTune) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut found_cputune = false;
+    let is_empty = cpu_tune.vcpu_pins.is_empty() && cpu_tune.emulatorpin.is_none();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "cputune" {
+                    found_cputune = true;
+                    // Skip existing cputune element entirely
+                    let mut depth = 1u32;
+                    loop {
+                        match reader.read_event() {
+                            Ok(Event::Start(_)) => depth += 1,
+                            Ok(Event::End(_)) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            Ok(Event::Eof) => break,
+                            _ => {}
+                        }
+                    }
+                    // Insert replacement if not empty
+                    if !is_empty {
+                        result.push_str(&build_cputune_xml(cpu_tune));
+                    }
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "cputune" {
+                    found_cputune = true;
+                    if !is_empty {
+                        result.push_str(&build_cputune_xml(cpu_tune));
+                    }
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    if !found_cputune && !is_empty {
+        // Insert before </domain>
+        if let Some(pos) = result.rfind("</domain>") {
+            result.insert_str(pos, &build_cputune_xml(cpu_tune));
+        }
+    }
+
+    Ok(result)
+}
+
+fn build_cputune_xml(cpu_tune: &CpuTune) -> String {
+    let mut xml = String::from("<cputune>");
+    for pin in &cpu_tune.vcpu_pins {
+        xml.push_str(&format!(
+            r#"<vcpupin vcpu="{}" cpuset="{}"/>"#,
+            pin.vcpu, pin.cpuset
+        ));
+    }
+    if let Some(ref cpuset) = cpu_tune.emulatorpin {
+        xml.push_str(&format!(r#"<emulatorpin cpuset="{}"/>"#, cpuset));
+    }
+    xml.push_str("</cputune>");
+    xml
 }
 
 pub fn remove_network_device(xml: &str, mac_address: &str) -> Result<String, AppError> {

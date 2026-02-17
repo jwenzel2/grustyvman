@@ -562,6 +562,20 @@ pub struct SoundInfo {
     pub model: SoundModel,
 }
 
+// --- CPU Pinning Types ---
+
+#[derive(Debug, Clone)]
+pub struct VcpuPin {
+    pub vcpu: u32,
+    pub cpuset: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CpuTune {
+    pub vcpu_pins: Vec<VcpuPin>,
+    pub emulatorpin: Option<String>,
+}
+
 // --- VM Types ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,6 +768,9 @@ pub enum ConfigAction {
     ModifyGraphics(GraphicsType),
     ModifyVideo(VideoModel),
     ModifySound(SoundModel),
+    EjectCdrom(String),
+    InsertCdrom(String, String),
+    ApplyCpuTune(CpuTune),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -867,4 +884,5 @@ pub struct DomainDetails {
     pub graphics: Option<GraphicsInfo>,
     pub video: Option<VideoInfo>,
     pub sound: Option<SoundInfo>,
+    pub cpu_tune: CpuTune,
 }

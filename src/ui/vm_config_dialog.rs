@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::types::{
-    BootDevice, ConfigAction, ConfigChanges, CpuMode, DomainDetails, FirmwareType, GraphicsType,
-    SoundModel, VideoModel, CPU_MODELS,
+    BootDevice, ConfigAction, ConfigChanges, CpuMode, CpuTune, DomainDetails, FirmwareType,
+    GraphicsType, SoundModel, VcpuPin, VideoModel, CPU_MODELS,
 };
 
 pub fn show_config_dialog(
@@ -16,6 +16,7 @@ pub fn show_config_dialog(
     autostart: bool,
     is_running: bool,
     networks: Vec<String>,
+    host_cpu_count: u32,
     on_action: impl Fn(ConfigAction) + Clone + 'static,
 ) {
     let window = adw::PreferencesWindow::new();
@@ -115,6 +116,74 @@ pub fn show_config_dialog(
     general_group.add(&autostart_row);
 
     overview_page.add(&general_group);
+
+    // CPU Pinning group
+    let pinning_group = adw::PreferencesGroup::new();
+    pinning_group.set_title("CPU Pinning");
+    if host_cpu_count > 0 {
+        pinning_group.set_description(Some(&format!(
+            "Host has {} logical CPUs (0-{})",
+            host_cpu_count,
+            host_cpu_count - 1
+        )));
+    }
+
+    let vcpu_count = details.vcpus;
+    let pin_entries: Rc<RefCell<Vec<adw::EntryRow>>> = Rc::new(RefCell::new(Vec::new()));
+
+    for i in 0..vcpu_count {
+        let entry = adw::EntryRow::new();
+        entry.set_title(&format!("vCPU {i}"));
+        // Pre-fill with existing pin value
+        if let Some(pin) = details.cpu_tune.vcpu_pins.iter().find(|p| p.vcpu == i) {
+            entry.set_text(&pin.cpuset);
+        }
+        pinning_group.add(&entry);
+        pin_entries.borrow_mut().push(entry);
+    }
+
+    let emulator_pin_entry = adw::EntryRow::new();
+    emulator_pin_entry.set_title("Emulator Thread");
+    if let Some(ref cpuset) = details.cpu_tune.emulatorpin {
+        emulator_pin_entry.set_text(cpuset);
+    }
+    pinning_group.add(&emulator_pin_entry);
+
+    let pin_apply_btn = gtk::Button::with_label("Apply CPU Pinning");
+    pin_apply_btn.add_css_class("suggested-action");
+    pin_apply_btn.add_css_class("pill");
+    pin_apply_btn.set_halign(gtk::Align::Center);
+    pin_apply_btn.set_margin_top(8);
+
+    let on_action_pin = on_action.clone();
+    let window_ref_pin = window.clone();
+    let pin_entries_ref = pin_entries.clone();
+    let emulator_entry_ref = emulator_pin_entry.clone();
+    pin_apply_btn.connect_clicked(move |_| {
+        let entries = pin_entries_ref.borrow();
+        let mut vcpu_pins = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            let text = entry.text().trim().to_string();
+            if !text.is_empty() {
+                vcpu_pins.push(VcpuPin {
+                    vcpu: i as u32,
+                    cpuset: text,
+                });
+            }
+        }
+        let emulatorpin = {
+            let text = emulator_entry_ref.text().trim().to_string();
+            if text.is_empty() { None } else { Some(text) }
+        };
+        on_action_pin(ConfigAction::ApplyCpuTune(CpuTune {
+            vcpu_pins,
+            emulatorpin,
+        }));
+        window_ref_pin.close();
+    });
+    pinning_group.add(&pin_apply_btn);
+
+    overview_page.add(&pinning_group);
 
     // Apply button group
     let apply_group = adw::PreferencesGroup::new();
@@ -316,11 +385,67 @@ pub fn show_config_dialog(
         let row = adw::ActionRow::new();
         let type_label = if disk.device_type == "cdrom" { " (CD-ROM)" } else { "" };
         row.set_title(&format!("/dev/{}{}", disk.target_dev, type_label));
-        row.set_subtitle(&disk.source_file.clone().unwrap_or_else(|| "No source".to_string()));
+        row.set_subtitle(&disk.source_file.clone().unwrap_or_else(|| "No media".to_string()));
 
+        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        btn_box.set_valign(gtk::Align::Center);
+
+        if disk.device_type == "cdrom" {
+            // Eject button
+            let eject_btn = gtk::Button::from_icon_name("media-eject-symbolic");
+            eject_btn.add_css_class("flat");
+            eject_btn.set_tooltip_text(Some("Eject Media"));
+            eject_btn.set_sensitive(disk.source_file.is_some());
+            let on_action_eject = on_action.clone();
+            let target = disk.target_dev.clone();
+            let window_ref = window.clone();
+            eject_btn.connect_clicked(move |_| {
+                on_action_eject(ConfigAction::EjectCdrom(target.clone()));
+                window_ref.close();
+            });
+            btn_box.append(&eject_btn);
+
+            // Change media button
+            let change_btn = gtk::Button::from_icon_name("document-open-symbolic");
+            change_btn.add_css_class("flat");
+            change_btn.set_tooltip_text(Some("Change Media"));
+            let on_action_change = on_action.clone();
+            let target = disk.target_dev.clone();
+            let window_ref = window.clone();
+            let parent_ref = parent.clone();
+            change_btn.connect_clicked(move |_| {
+                let on_action = on_action_change.clone();
+                let target = target.clone();
+                let wr = window_ref.clone();
+                let dialog = gtk::FileDialog::builder()
+                    .title("Select ISO Image")
+                    .build();
+                let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.iso");
+                filter.add_pattern("*.ISO");
+                filter.set_name(Some("ISO Images"));
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                dialog.set_filters(Some(&filters));
+                dialog.open(Some(&parent_ref), gtk::gio::Cancellable::NONE, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            on_action(ConfigAction::InsertCdrom(
+                                target.clone(),
+                                path.to_string_lossy().to_string(),
+                            ));
+                            wr.close();
+                        }
+                    }
+                });
+            });
+            btn_box.append(&change_btn);
+        }
+
+        // Remove button (for all disks)
         let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
         remove_btn.add_css_class("flat");
-        remove_btn.set_valign(gtk::Align::Center);
+        remove_btn.set_tooltip_text(Some("Remove Disk"));
         let on_action_disk = on_action.clone();
         let target = disk.target_dev.clone();
         let window_ref = window.clone();
@@ -328,7 +453,9 @@ pub fn show_config_dialog(
             on_action_disk(ConfigAction::RemoveDisk(target.clone()));
             window_ref.close();
         });
-        row.add_suffix(&remove_btn);
+        btn_box.append(&remove_btn);
+
+        row.add_suffix(&btn_box);
         row.set_activatable(false);
         disks_group.add(&row);
     }

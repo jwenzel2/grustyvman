@@ -1852,7 +1852,10 @@ impl Window {
                 let is_running = vms.iter().any(|v| {
                     v.uuid == uuid && v.state == backend::types::VmState::Running
                 });
-                Ok::<_, crate::error::AppError>((details, autostart, networks, is_running))
+                let host_cpu_count = backend::connection::get_host_info(&uri)
+                    .map(|h| h.cpu_threads)
+                    .unwrap_or(0);
+                Ok::<_, crate::error::AppError>((details, autostart, networks, is_running, host_cpu_count))
             }
         });
 
@@ -1861,7 +1864,7 @@ impl Window {
             let Some(win) = win.upgrade() else { return };
 
             match result {
-                Ok((details, autostart, networks, is_running)) => {
+                Ok((details, autostart, networks, is_running, host_cpu_count)) => {
                     let win_ref = win.downgrade();
                     let uuid_clone = uuid.clone();
                     let uri = win.imp().connection_uri.borrow().clone();
@@ -1872,6 +1875,7 @@ impl Window {
                         autostart,
                         is_running,
                         networks,
+                        host_cpu_count,
                         move |action| {
                             let Some(win) = win_ref.upgrade() else { return };
                             let uri = uri.clone();
@@ -2214,6 +2218,24 @@ impl Window {
             ConfigAction::ModifySound(smodel) => {
                 let xml = backend::domain::get_domain_xml(uri, uuid)?;
                 let xml = backend::domain_xml::modify_sound(&xml, smodel)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::EjectCdrom(target_dev) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::eject_cdrom(&xml, &target_dev)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::InsertCdrom(target_dev, iso_path) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::change_cdrom_media(&xml, &target_dev, &iso_path)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ApplyCpuTune(cpu_tune) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_cputune(&xml, &cpu_tune)?;
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }
