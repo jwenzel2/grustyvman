@@ -101,9 +101,9 @@ impl VmDetailsView {
         networks_group.set_title("Network");
         container.append(&networks_group);
 
-        // Display & Media group
+        // Display &amp; Media group
         let display_group = adw::PreferencesGroup::new();
-        display_group.set_title("Display & Media");
+        display_group.set_title("Display &amp; Media");
         container.append(&display_group);
 
         Self {
@@ -204,7 +204,7 @@ impl VmDetailsView {
             }
         }
 
-        // Display & Media
+        // Display &amp; Media
         clear_pref_group(&self.display_group);
 
         if let Some(ref gfx) = details.graphics {
