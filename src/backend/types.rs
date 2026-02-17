@@ -562,6 +562,65 @@ pub struct SoundInfo {
     pub model: SoundModel,
 }
 
+// --- TPM Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TpmModel {
+    Crb,
+    Tis,
+    None,
+}
+
+impl TpmModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TpmModel::Crb => "tpm-crb",
+            TpmModel::Tis => "tpm-tis",
+            TpmModel::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "tpm-crb" => TpmModel::Crb,
+            "tpm-tis" => TpmModel::Tis,
+            _ => TpmModel::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TpmModel::Crb => "CRB",
+            TpmModel::Tis => "TIS",
+            TpmModel::None => "None",
+        }
+    }
+
+    pub const ALL: &[TpmModel] = &[TpmModel::Crb, TpmModel::Tis, TpmModel::None];
+}
+
+impl fmt::Display for TpmModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TpmInfo {
+    pub model: TpmModel,
+    pub version: String,
+}
+
+// --- Filesystem Passthrough Types ---
+
+#[derive(Debug, Clone)]
+pub struct FilesystemInfo {
+    pub driver: String,
+    pub source_dir: String,
+    pub target_dir: String,
+    pub accessmode: Option<String>,
+}
+
 // --- CPU Pinning Types ---
 
 #[derive(Debug, Clone)]
@@ -771,6 +830,9 @@ pub enum ConfigAction {
     EjectCdrom(String),
     InsertCdrom(String, String),
     ApplyCpuTune(CpuTune),
+    ModifyTpm(TpmModel),
+    AddFilesystem(FilesystemInfo),
+    RemoveFilesystem(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -885,4 +947,6 @@ pub struct DomainDetails {
     pub video: Option<VideoInfo>,
     pub sound: Option<SoundInfo>,
     pub cpu_tune: CpuTune,
+    pub tpm: Option<TpmInfo>,
+    pub filesystems: Vec<FilesystemInfo>,
 }

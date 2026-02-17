@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::types::{
-    BootDevice, ConfigAction, ConfigChanges, CpuMode, CpuTune, DomainDetails, FirmwareType,
-    GraphicsType, SoundModel, VcpuPin, VideoModel, CPU_MODELS,
+    BootDevice, ConfigAction, ConfigChanges, CpuMode, CpuTune, DomainDetails, FilesystemInfo,
+    FirmwareType, GraphicsType, SoundModel, TpmModel, VcpuPin, VideoModel, CPU_MODELS,
 };
 
 pub fn show_config_dialog(
@@ -535,6 +535,123 @@ pub fn show_config_dialog(
     });
 
     devices_page.add(&networks_group);
+
+    // TPM group
+    let tpm_group = adw::PreferencesGroup::new();
+    tpm_group.set_title("TPM");
+
+    let tpm_labels: Vec<&str> = TpmModel::ALL.iter().map(|t| t.label()).collect();
+    let tpm_list = gtk::StringList::new(&tpm_labels);
+    let tpm_row = adw::ComboRow::new();
+    tpm_row.set_title("TPM Model");
+    tpm_row.set_model(Some(&tpm_list));
+    let current_tpm_idx = details
+        .tpm
+        .as_ref()
+        .and_then(|t| TpmModel::ALL.iter().position(|m| *m == t.model))
+        .unwrap_or(TpmModel::ALL.len() - 1); // default to None
+    tpm_row.set_selected(current_tpm_idx as u32);
+    tpm_group.add(&tpm_row);
+
+    let tpm_apply_btn = gtk::Button::with_label("Apply TPM");
+    tpm_apply_btn.add_css_class("suggested-action");
+    tpm_apply_btn.add_css_class("pill");
+    tpm_apply_btn.set_halign(gtk::Align::Center);
+    tpm_apply_btn.set_margin_top(8);
+
+    let on_action_tpm = on_action.clone();
+    let window_ref_tpm = window.clone();
+    tpm_apply_btn.connect_clicked(move |_| {
+        let idx = tpm_row.selected() as usize;
+        let model = TpmModel::ALL.get(idx).copied().unwrap_or(TpmModel::None);
+        on_action_tpm(ConfigAction::ModifyTpm(model));
+        window_ref_tpm.close();
+    });
+    tpm_group.add(&tpm_apply_btn);
+
+    devices_page.add(&tpm_group);
+
+    // Shared Folders group
+    let fs_group = adw::PreferencesGroup::new();
+    fs_group.set_title("Shared Folders");
+
+    let add_fs_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_fs_btn.set_tooltip_text(Some("Add Shared Folder"));
+    add_fs_btn.add_css_class("flat");
+    fs_group.set_header_suffix(Some(&add_fs_btn));
+
+    for fs in &details.filesystems {
+        let row = adw::ActionRow::new();
+        row.set_title(&fs.target_dir);
+        row.set_subtitle(&format!("{} ({})", fs.source_dir, fs.driver));
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_fs_rm = on_action.clone();
+        let target = fs.target_dir.clone();
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_fs_rm(ConfigAction::RemoveFilesystem(target.clone()));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        fs_group.add(&row);
+    }
+
+    devices_page.add(&fs_group);
+
+    // Add Shared Folder form
+    let fs_add_group = adw::PreferencesGroup::new();
+
+    let fs_host_path_entry = adw::EntryRow::new();
+    fs_host_path_entry.set_title("Host Path");
+    fs_add_group.add(&fs_host_path_entry);
+
+    let fs_mount_tag_entry = adw::EntryRow::new();
+    fs_mount_tag_entry.set_title("Mount Tag");
+    fs_add_group.add(&fs_mount_tag_entry);
+
+    let fs_driver_labels = ["virtio-9p", "virtiofs"];
+    let fs_driver_list = gtk::StringList::new(&fs_driver_labels);
+    let fs_driver_row = adw::ComboRow::new();
+    fs_driver_row.set_title("Driver");
+    fs_driver_row.set_model(Some(&fs_driver_list));
+    fs_add_group.add(&fs_driver_row);
+
+    let fs_add_apply_btn = gtk::Button::with_label("Add Shared Folder");
+    fs_add_apply_btn.add_css_class("suggested-action");
+    fs_add_apply_btn.add_css_class("pill");
+    fs_add_apply_btn.set_halign(gtk::Align::Center);
+    fs_add_apply_btn.set_margin_top(8);
+
+    let on_action_fs_add = on_action.clone();
+    let window_ref_fs = window.clone();
+    fs_add_apply_btn.connect_clicked(move |_| {
+        let host_path = fs_host_path_entry.text().trim().to_string();
+        let mount_tag = fs_mount_tag_entry.text().trim().to_string();
+        if host_path.is_empty() || mount_tag.is_empty() {
+            return;
+        }
+        let driver_idx = fs_driver_row.selected() as usize;
+        let driver = if driver_idx == 1 { "virtiofs" } else { "9p" }.to_string();
+        let accessmode = if driver == "9p" {
+            Some("mapped".to_string())
+        } else {
+            None
+        };
+        on_action_fs_add(ConfigAction::AddFilesystem(FilesystemInfo {
+            driver,
+            source_dir: host_path,
+            target_dir: mount_tag,
+            accessmode,
+        }));
+        window_ref_fs.close();
+    });
+    fs_add_group.add(&fs_add_apply_btn);
+
+    devices_page.add(&fs_add_group);
 
     window.add(&devices_page);
 

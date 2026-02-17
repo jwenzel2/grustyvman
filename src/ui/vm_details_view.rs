@@ -19,6 +19,8 @@ pub struct VmDetailsView {
     disks_group: adw::PreferencesGroup,
     networks_group: adw::PreferencesGroup,
     display_group: adw::PreferencesGroup,
+    tpm_row: adw::ActionRow,
+    filesystems_group: adw::PreferencesGroup,
     cpu_pinning_group: adw::PreferencesGroup,
 }
 
@@ -105,7 +107,18 @@ impl VmDetailsView {
         // Display &amp; Media group
         let display_group = adw::PreferencesGroup::new();
         display_group.set_title("Display &amp; Media");
+
+        let tpm_row = adw::ActionRow::new();
+        tpm_row.set_title("TPM");
+        tpm_row.set_activatable(false);
+        display_group.add(&tpm_row);
+
         container.append(&display_group);
+
+        // Shared Folders group
+        let filesystems_group = adw::PreferencesGroup::new();
+        filesystems_group.set_title("Shared Folders");
+        container.append(&filesystems_group);
 
         // CPU Pinning group
         let cpu_pinning_group = adw::PreferencesGroup::new();
@@ -127,6 +140,8 @@ impl VmDetailsView {
             disks_group,
             networks_group,
             display_group,
+            tpm_row,
+            filesystems_group,
             cpu_pinning_group,
         }
     }
@@ -255,6 +270,30 @@ impl VmDetailsView {
             row.set_subtitle("None");
             row.set_activatable(false);
             self.display_group.add(&row);
+        }
+
+        // TPM
+        if let Some(ref tpm) = details.tpm {
+            self.tpm_row.set_subtitle(&format!("TPM {} ({})", tpm.version, tpm.model.label()));
+        } else {
+            self.tpm_row.set_subtitle("None");
+        }
+
+        // Shared Folders
+        clear_pref_group(&self.filesystems_group);
+        if details.filesystems.is_empty() {
+            let row = adw::ActionRow::new();
+            row.set_title("No shared folders");
+            row.set_activatable(false);
+            self.filesystems_group.add(&row);
+        } else {
+            for fs in &details.filesystems {
+                let row = adw::ActionRow::new();
+                row.set_title(&fs.target_dir);
+                row.set_subtitle(&format!("{} ({})", fs.source_dir, fs.driver));
+                row.set_activatable(false);
+                self.filesystems_group.add(&row);
+            }
         }
 
         // CPU Pinning

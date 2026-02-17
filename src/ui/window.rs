@@ -2239,6 +2239,24 @@ impl Window {
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }
+            ConfigAction::ModifyTpm(tpm_model) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_tpm(&xml, tpm_model)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddFilesystem(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_filesystem(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveFilesystem(target_dir) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_filesystem(&xml, &target_dir)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
         }
     }
 }

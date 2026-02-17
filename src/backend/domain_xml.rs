@@ -1,7 +1,7 @@
 use crate::backend::types::{
-    BootDevice, CpuMode, CpuTune, DiskInfo, DomainDetails, FirmwareType, GraphicsInfo,
-    GraphicsType, NetworkInfo, NewDiskParams, NewNetworkParams, SoundInfo, SoundModel, VcpuPin,
-    VideoInfo, VideoModel,
+    BootDevice, CpuMode, CpuTune, DiskInfo, DomainDetails, FilesystemInfo, FirmwareType,
+    GraphicsInfo, GraphicsType, NetworkInfo, NewDiskParams, NewNetworkParams, SoundInfo, SoundModel,
+    TpmInfo, TpmModel, VcpuPin, VideoInfo, VideoModel,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -190,6 +190,8 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         video: None,
         sound: None,
         cpu_tune: CpuTune::default(),
+        tpm: None,
+        filesystems: Vec::new(),
     };
 
     #[derive(Debug)]
@@ -220,12 +222,25 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         model_type: Option<String>,
     }
 
+    #[derive(Debug, Default)]
+    struct FilesystemBuilder {
+        driver: String,
+        source_dir: String,
+        target_dir: String,
+        accessmode: Option<String>,
+    }
+
     let mut context = Context::None;
     let mut in_devices = false;
     let mut in_os = false;
     let mut in_cpu = false;
     let mut in_video = false;
     let mut in_cputune = false;
+    let mut in_tpm = false;
+    let mut tpm_model = String::new();
+    let mut tpm_version = String::new();
+    let mut in_filesystem = false;
+    let mut fs_builder = FilesystemBuilder::default();
     let mut os_arch = String::new();
 
     loop {
@@ -334,26 +349,43 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                         context = Context::Disk(db);
                     }
                     "source" => {
-                        match &mut context {
-                            Context::Disk(ref mut db) => {
-                                for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"file" {
-                                        db.source_file = Some(
-                                            String::from_utf8_lossy(&attr.value).to_string(),
-                                        );
-                                    }
+                        if in_filesystem {
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"dir" {
+                                    fs_builder.source_dir =
+                                        String::from_utf8_lossy(&attr.value).to_string();
                                 }
                             }
-                            Context::Interface(ref mut ib) => {
-                                for attr in e.attributes().flatten() {
-                                    if attr.key.as_ref() == b"network" {
-                                        ib.source_network = Some(
-                                            String::from_utf8_lossy(&attr.value).to_string(),
-                                        );
+                        } else {
+                            match &mut context {
+                                Context::Disk(ref mut db) => {
+                                    for attr in e.attributes().flatten() {
+                                        if attr.key.as_ref() == b"file" {
+                                            db.source_file = Some(
+                                                String::from_utf8_lossy(&attr.value).to_string(),
+                                            );
+                                        }
                                     }
                                 }
+                                Context::Interface(ref mut ib) => {
+                                    for attr in e.attributes().flatten() {
+                                        if attr.key.as_ref() == b"network" {
+                                            ib.source_network = Some(
+                                                String::from_utf8_lossy(&attr.value).to_string(),
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+                    }
+                    "target" if in_filesystem => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dir" {
+                                fs_builder.target_dir =
+                                    String::from_utf8_lossy(&attr.value).to_string();
+                            }
                         }
                     }
                     "target" if matches!(context, Context::Disk(_)) => {
@@ -475,6 +507,42 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                         }
                         details.sound = Some(SoundInfo { model: smodel });
                     }
+                    "tpm" if in_devices => {
+                        in_tpm = true;
+                        tpm_model.clear();
+                        tpm_version.clear();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"model" {
+                                tpm_model = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    "backend" if in_tpm => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"version" {
+                                tpm_version = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    "filesystem" if in_devices => {
+                        in_filesystem = true;
+                        fs_builder = FilesystemBuilder::default();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"accessmode" {
+                                fs_builder.accessmode = Some(
+                                    String::from_utf8_lossy(&attr.value).to_string(),
+                                );
+                            }
+                        }
+                    }
+                    "driver" if in_filesystem => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"type" {
+                                fs_builder.driver =
+                                    String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -526,6 +594,37 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     }
                     "video" => {
                         in_video = false;
+                    }
+                    "tpm" => {
+                        if in_tpm {
+                            let model = TpmModel::from_str(&tpm_model);
+                            if model != TpmModel::None {
+                                details.tpm = Some(TpmInfo {
+                                    model,
+                                    version: if tpm_version.is_empty() {
+                                        "2.0".to_string()
+                                    } else {
+                                        tpm_version.clone()
+                                    },
+                                });
+                            }
+                            in_tpm = false;
+                        }
+                    }
+                    "filesystem" => {
+                        if in_filesystem {
+                            details.filesystems.push(FilesystemInfo {
+                                driver: if fs_builder.driver.is_empty() {
+                                    "9p".to_string()
+                                } else {
+                                    fs_builder.driver.clone()
+                                },
+                                source_dir: fs_builder.source_dir.clone(),
+                                target_dir: fs_builder.target_dir.clone(),
+                                accessmode: fs_builder.accessmode.clone(),
+                            });
+                            in_filesystem = false;
+                        }
                     }
                     "disk" => {
                         if let Context::Disk(db) = std::mem::replace(&mut context, Context::None) {
@@ -1982,6 +2081,230 @@ pub fn remove_network_device(xml: &str, mac_address: &str) -> Result<String, App
                 let text = e.unescape().unwrap_or_default().to_string();
                 if in_iface {
                     iface_buffer.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn modify_tpm(xml: &str, tpm_model: TpmModel) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "tpm" if in_devices => {
+                        // Skip this element and its children
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "tpm" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    if tpm_model != TpmModel::None {
+                        result.push_str(&format!(
+                            r#"<tpm model="{}"><backend type="emulated" version="2.0"/></tpm>"#,
+                            tpm_model.as_str()
+                        ));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn add_filesystem(xml: &str, info: &FilesystemInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let fs_xml = if info.driver == "virtiofs" {
+        format!(
+            r#"<filesystem type="mount"><driver type="virtiofs"/><source dir="{}"/><target dir="{}"/></filesystem>"#,
+            info.source_dir, info.target_dir,
+        )
+    } else {
+        format!(
+            r#"<filesystem type="mount" accessmode="{}"><source dir="{}"/><target dir="{}"/></filesystem>"#,
+            info.accessmode.as_deref().unwrap_or("mapped"),
+            info.source_dir,
+            info.target_dir,
+        )
+    };
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&fs_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_filesystem(xml: &str, target_dir: &str) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut fs_buffer = String::new();
+    let mut fs_depth = 0u32;
+    let mut in_fs = false;
+    let mut found_target = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_fs {
+                    fs_depth += 1;
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dir" {
+                                let dir = String::from_utf8_lossy(&attr.value).to_string();
+                                if dir == target_dir {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    fs_buffer.push('<');
+                    write_element(&mut fs_buffer, e);
+                    fs_buffer.push('>');
+                    continue;
+                }
+
+                if name == "filesystem" {
+                    in_fs = true;
+                    fs_depth = 1;
+                    fs_buffer.clear();
+                    fs_buffer.push('<');
+                    write_element(&mut fs_buffer, e);
+                    fs_buffer.push('>');
+                    found_target = false;
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_fs {
+                    fs_depth -= 1;
+                    fs_buffer.push_str(&format!("</{name}>"));
+                    if fs_depth == 0 {
+                        in_fs = false;
+                        if !found_target {
+                            result.push_str(&fs_buffer);
+                        }
+                        fs_buffer.clear();
+                    }
+                    continue;
+                }
+
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_fs {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dir" {
+                                let dir = String::from_utf8_lossy(&attr.value).to_string();
+                                if dir == target_dir {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    fs_buffer.push('<');
+                    write_element(&mut fs_buffer, e);
+                    fs_buffer.push_str("/>");
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_fs {
+                    fs_buffer.push_str(&text);
                 } else {
                     result.push_str(&text);
                 }
