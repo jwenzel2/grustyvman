@@ -15,6 +15,7 @@ use crate::ui::network_details_view::NetworkDetailsView;
 use crate::ui::network_row::NetworkRow;
 use crate::ui::pool_details_view::PoolDetailsView;
 use crate::ui::pool_row::PoolRow;
+use crate::ui::host_details_view::HostDetailsView;
 use crate::ui::vm_details_view::VmDetailsView;
 use crate::ui::vm_performance_view::VmPerformanceView;
 use crate::ui::vm_snapshot_view::VmSnapshotView;
@@ -74,6 +75,8 @@ mod imp {
         pub network_list_store: gio::ListStore,
         pub network_details_view: NetworkDetailsView,
         pub selected_network_uuid: RefCell<Option<String>>,
+        // Host details
+        pub host_details_view: HostDetailsView,
     }
 
     #[allow(deprecated)]
@@ -111,6 +114,7 @@ mod imp {
                 network_list_store: gio::ListStore::new::<NetworkObject>(),
                 network_details_view: NetworkDetailsView::new(),
                 selected_network_uuid: RefCell::new(None),
+                host_details_view: HostDetailsView::new(),
             }
         }
     }
@@ -207,9 +211,13 @@ impl Window {
         let btn_networks = gtk::ToggleButton::with_label("Networks");
         btn_networks.set_group(Some(&btn_vms));
         btn_networks.set_hexpand(true);
+        let btn_host = gtk::ToggleButton::with_label("Host");
+        btn_host.set_group(Some(&btn_vms));
+        btn_host.set_hexpand(true);
         toggle_box.append(&btn_vms);
         toggle_box.append(&btn_storage);
         toggle_box.append(&btn_networks);
+        toggle_box.append(&btn_host);
 
         // VM list
         let vm_list_box = vm_list_view::create_vm_list_box();
@@ -397,6 +405,14 @@ impl Window {
         network_empty_page.set_icon_name(Some("network-wired-symbolic"));
         outer_stack.add_named(&network_empty_page, Some("network-empty"));
 
+        // Host content
+        let host_scrolled = gtk::ScrolledWindow::new();
+        let host_clamp = adw::Clamp::new();
+        host_clamp.set_maximum_size(800);
+        host_clamp.set_child(Some(&imp.host_details_view.container));
+        host_scrolled.set_child(Some(&host_clamp));
+        outer_stack.add_named(&host_scrolled, Some("host-content"));
+
         outer_stack.set_visible_child_name("empty");
         content_toolbar.set_content(Some(outer_stack));
 
@@ -473,6 +489,49 @@ impl Window {
                     }
                     win.update_button_sensitivity_for_mode();
                     win.refresh_network_list();
+                }
+            }
+        });
+
+        let win = self.downgrade();
+        let new_btn_ref = new_vm_btn.clone();
+        btn_host.connect_toggled(move |btn| {
+            if btn.is_active() {
+                if let Some(win) = win.upgrade() {
+                    *win.imp().active_sidebar.borrow_mut() = "host".to_string();
+                    win.imp().sidebar_stack.set_visible_child_name("vms");
+                    new_btn_ref.set_visible(false);
+                    win.stop_perf_sampling();
+                    win.imp().outer_stack.set_visible_child_name("host-content");
+                    win.update_button_sensitivity_for_mode();
+                    win.load_host_info();
+                }
+            }
+        });
+
+        // Restore New button visibility when switching away from Host
+        let new_btn_ref = new_vm_btn.clone();
+        btn_vms.connect_toggled({
+            let new_btn_ref = new_btn_ref.clone();
+            move |btn| {
+                if btn.is_active() {
+                    new_btn_ref.set_visible(true);
+                }
+            }
+        });
+        btn_storage.connect_toggled({
+            let new_btn_ref = new_btn_ref.clone();
+            move |btn| {
+                if btn.is_active() {
+                    new_btn_ref.set_visible(true);
+                }
+            }
+        });
+        btn_networks.connect_toggled({
+            let new_btn_ref = new_btn_ref.clone();
+            move |btn| {
+                if btn.is_active() {
+                    new_btn_ref.set_visible(true);
                 }
             }
         });
@@ -625,7 +684,7 @@ impl Window {
 
     fn update_button_sensitivity_for_mode(&self) {
         let sidebar = self.imp().active_sidebar.borrow().clone();
-        if sidebar == "storage" || sidebar == "networks" {
+        if sidebar == "storage" || sidebar == "networks" || sidebar == "host" {
             self.set_vm_buttons_visible(false);
         } else {
             self.set_vm_buttons_visible(true);
@@ -903,6 +962,29 @@ impl Window {
         let toast = adw::Toast::new(message);
         toast.set_timeout(3);
         self.imp().toast_overlay.add_toast(toast);
+    }
+
+    fn load_host_info(&self) {
+        let uri = self.imp().connection_uri.borrow().clone();
+        let win = self.downgrade();
+
+        let rx = spawn_blocking(move || backend::connection::get_host_info(&uri));
+
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+
+            match result {
+                Ok(info) => {
+                    win.imp().view_switcher_title.set_title("Host Details");
+                    win.imp().view_switcher_title.set_subtitle(&info.hostname);
+                    win.imp().host_details_view.update(&info);
+                }
+                Err(e) => {
+                    win.show_toast(&format!("Failed to load host info: {e}"));
+                }
+            }
+        });
     }
 
     fn refresh_vm_list(&self) {

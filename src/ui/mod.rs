@@ -1,5 +1,6 @@
 pub mod add_disk_dialog;
 pub mod add_network_dialog;
+pub mod host_details_view;
 pub mod create_network_dialog;
 pub mod create_pool_dialog;
 pub mod create_snapshot_dialog;
