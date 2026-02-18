@@ -703,7 +703,7 @@ pub fn show_config_dialog(
 
     // --- Serial / Console Ports group ---
     let serial_group = adw::PreferencesGroup::new();
-    serial_group.set_title("Serial & Console Ports");
+    serial_group.set_title("Serial &amp; Console Ports");
 
     let add_serial_btn = gtk::Button::from_icon_name("list-add-symbolic");
     add_serial_btn.set_tooltip_text(Some("Add Serial/Console Port"));
