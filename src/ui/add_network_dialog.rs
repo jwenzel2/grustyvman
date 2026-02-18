@@ -12,7 +12,7 @@ pub fn show_add_network_dialog(
 ) {
     let dialog = gtk::Window::new();
     dialog.set_title(Some("Add Network Interface"));
-    dialog.set_default_size(400, 300);
+    dialog.set_default_size(400, 320);
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
 
@@ -51,6 +51,12 @@ pub fn show_add_network_dialog(
     model_row.set_model(Some(&model_list));
     group.add(&model_row);
 
+    // Optional MAC address
+    let mac_row = adw::EntryRow::new();
+    mac_row.set_title("MAC Address (optional)");
+    mac_row.set_show_apply_button(false);
+    group.add(&mac_row);
+
     content.append(&group);
 
     // Add button
@@ -82,9 +88,13 @@ pub fn show_add_network_dialog(
         let model_idx = model_row.selected() as usize;
         let model_type = ["virtio", "e1000", "rtl8139"][model_idx].to_string();
 
+        let mac_text = mac_row.text().trim().to_string();
+        let mac_address = if mac_text.is_empty() { None } else { Some(mac_text) };
+
         let params = NewNetworkParams {
             source_network,
             model_type,
+            mac_address,
         };
 
         on_add(params);

@@ -61,6 +61,8 @@ mod imp {
         pub btn_console: gtk::Button,
         pub btn_delete: gtk::Button,
         pub btn_settings: gtk::Button,
+        pub btn_rename: gtk::Button,
+        pub btn_clone: gtk::Button,
         // Perf sampling state
         pub perf_timer_id: RefCell<Option<glib::SourceId>>,
         pub last_perf_sample: RefCell<Option<(Instant, RawPerfSample)>>,
@@ -105,6 +107,8 @@ mod imp {
                 btn_console: gtk::Button::new(),
                 btn_delete: gtk::Button::new(),
                 btn_settings: gtk::Button::new(),
+                btn_rename: gtk::Button::new(),
+                btn_clone: gtk::Button::new(),
                 perf_timer_id: RefCell::new(None),
                 last_perf_sample: RefCell::new(None),
                 disk_targets: RefCell::new(Vec::new()),
@@ -327,6 +331,16 @@ impl Window {
         btn_settings.set_tooltip_text(Some("Settings"));
         btn_settings.set_sensitive(false);
 
+        let btn_rename = &imp.btn_rename;
+        btn_rename.set_icon_name("document-edit-symbolic");
+        btn_rename.set_tooltip_text(Some("Rename VM"));
+        btn_rename.set_sensitive(false);
+
+        let btn_clone = &imp.btn_clone;
+        btn_clone.set_icon_name("edit-copy-symbolic");
+        btn_clone.set_tooltip_text(Some("Clone VM"));
+        btn_clone.set_sensitive(false);
+
         content_header.pack_start(btn_start);
         content_header.pack_start(btn_pause);
         content_header.pack_start(btn_stop);
@@ -334,6 +348,8 @@ impl Window {
         content_header.pack_start(btn_reboot);
         content_header.pack_end(btn_settings);
         content_header.pack_end(btn_delete);
+        content_header.pack_end(btn_rename);
+        content_header.pack_end(btn_clone);
         content_header.pack_end(btn_console);
 
         content_toolbar.add_top_bar(&content_header);
@@ -687,6 +703,8 @@ impl Window {
         imp.btn_console.set_visible(visible);
         imp.btn_delete.set_visible(visible);
         imp.btn_settings.set_visible(visible);
+        imp.btn_rename.set_visible(visible);
+        imp.btn_clone.set_visible(visible);
         imp.view_switcher_title.set_visible(visible);
     }
 
@@ -788,6 +806,20 @@ impl Window {
         imp.btn_settings.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
                 win.show_config_dialog();
+            }
+        });
+
+        let win = self.downgrade();
+        imp.btn_rename.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.show_rename_dialog();
+            }
+        });
+
+        let win = self.downgrade();
+        imp.btn_clone.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.show_clone_dialog();
             }
         });
     }
@@ -1072,13 +1104,13 @@ impl Window {
         use crate::backend::types::VmState;
         let imp = self.imp();
 
-        let (start, pause, stop, force, reboot, console, delete, settings) = match state {
-            Some(VmState::Running) => (false, true, true, true, true, true, false, true),
-            Some(VmState::Paused) => (false, true, false, true, false, false, false, true),
-            Some(VmState::Shutoff) => (true, false, false, false, false, false, true, true),
-            Some(VmState::Crashed) => (false, false, false, true, false, false, true, true),
-            Some(_) => (false, false, false, true, false, false, false, true),
-            None => (false, false, false, false, false, false, false, false),
+        let (start, pause, stop, force, reboot, console, delete, settings, rename, clone) = match state {
+            Some(VmState::Running) => (false, true, true, true, true, true, false, true, false, false),
+            Some(VmState::Paused)  => (false, true, false, true, false, false, false, true, false, false),
+            Some(VmState::Shutoff) => (true, false, false, false, false, false, true, true, true, true),
+            Some(VmState::Crashed) => (false, false, false, true, false, false, true, true, false, false),
+            Some(_)                => (false, false, false, true, false, false, false, true, false, false),
+            None                   => (false, false, false, false, false, false, false, false, false, false),
         };
 
         imp.btn_start.set_sensitive(start);
@@ -1089,6 +1121,8 @@ impl Window {
         imp.btn_console.set_sensitive(console);
         imp.btn_delete.set_sensitive(delete);
         imp.btn_settings.set_sensitive(settings);
+        imp.btn_rename.set_sensitive(rename);
+        imp.btn_clone.set_sensitive(clone);
     }
 
     fn load_vm_details(&self, uuid: &str) {
@@ -1916,6 +1950,91 @@ impl Window {
         });
     }
 
+    fn show_rename_dialog(&self) {
+        let uuid = match self.imp().selected_uuid.borrow().clone() {
+            Some(u) => u,
+            None => return,
+        };
+        let uri = self.imp().connection_uri.borrow().clone();
+        let current_name = backend::domain::get_domain_name(&uri, &uuid).unwrap_or_default();
+        let win = self.downgrade();
+
+        crate::ui::rename_vm_dialog::show_rename_vm_dialog(
+            self.upcast_ref(),
+            &current_name,
+            move |new_name| {
+                let Some(win) = win.upgrade() else { return };
+                let uri2 = win.imp().connection_uri.borrow().clone();
+                let uuid2 = uuid.clone();
+
+                let rx = spawn_blocking(move || {
+                    backend::domain::rename_domain(&uri2, &uuid2, &new_name)
+                });
+
+                let win2 = win.downgrade();
+                glib::spawn_future_local(async move {
+                    let Ok(result) = rx.recv().await else { return };
+                    let Some(win) = win2.upgrade() else { return };
+                    match result {
+                        Ok(()) => {
+                            win.show_toast("VM renamed");
+                            win.refresh_vm_list();
+                            // UUID stays the same; reload details
+                            let uuid = win.imp().selected_uuid.borrow().clone();
+                            if let Some(uuid) = uuid {
+                                win.load_vm_details(&uuid);
+                            }
+                        }
+                        Err(e) => {
+                            win.show_toast(&format!("Rename failed: {e}"));
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    fn show_clone_dialog(&self) {
+        let uuid = match self.imp().selected_uuid.borrow().clone() {
+            Some(u) => u,
+            None => return,
+        };
+        let uri = self.imp().connection_uri.borrow().clone();
+        let source_name = backend::domain::get_domain_name(&uri, &uuid).unwrap_or_default();
+        let win = self.downgrade();
+
+        crate::ui::clone_vm_dialog::show_clone_vm_dialog(
+            self.upcast_ref(),
+            &source_name,
+            move |params| {
+                let Some(win) = win.upgrade() else { return };
+                let uri2 = win.imp().connection_uri.borrow().clone();
+                let uuid2 = uuid.clone();
+
+                win.show_toast("Cloning VM… this may take a while");
+
+                let rx = spawn_blocking(move || {
+                    backend::domain::clone_domain(&uri2, &uuid2, &params.new_name, params.full_clone)
+                });
+
+                let win2 = win.downgrade();
+                glib::spawn_future_local(async move {
+                    let Ok(result) = rx.recv().await else { return };
+                    let Some(win) = win2.upgrade() else { return };
+                    match result {
+                        Ok(()) => {
+                            win.show_toast("VM cloned successfully");
+                            win.refresh_vm_list();
+                        }
+                        Err(e) => {
+                            win.show_toast(&format!("Clone failed: {e}"));
+                        }
+                    }
+                });
+            },
+        );
+    }
+
     // --- Snapshot methods ---
 
     fn connect_xml_editor_callback(&self) {
@@ -2254,6 +2373,42 @@ impl Window {
             ConfigAction::RemoveFilesystem(target_dir) => {
                 let xml = backend::domain::get_domain_xml(uri, uuid)?;
                 let xml = backend::domain_xml::remove_filesystem(&xml, &target_dir)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddHostdev(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_hostdev_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveHostdev(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_hostdev_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddSerial(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_serial_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveSerial(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_serial_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifyRng(backend_opt) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_rng(&xml, backend_opt)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifyWatchdog(model, action) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_watchdog(&xml, model, action)?;
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }

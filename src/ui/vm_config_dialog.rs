@@ -653,6 +653,223 @@ pub fn show_config_dialog(
 
     devices_page.add(&fs_add_group);
 
+    // Host Devices (PCI/USB passthrough) group
+    let hostdev_group = adw::PreferencesGroup::new();
+    hostdev_group.set_title("Host Devices (PCI/USB Passthrough)");
+
+    let add_hostdev_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_hostdev_btn.set_tooltip_text(Some("Add Host Device"));
+    add_hostdev_btn.add_css_class("flat");
+    hostdev_group.set_header_suffix(Some(&add_hostdev_btn));
+
+    for hdev in &details.hostdevs {
+        let row = adw::ActionRow::new();
+        row.set_title(&hdev.display_name);
+        row.set_subtitle(&hdev.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_hdev = on_action.clone();
+        let hdev_clone = hdev.clone();
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_hdev(ConfigAction::RemoveHostdev(hdev_clone.clone()));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        hostdev_group.add(&row);
+    }
+
+    let on_action_hostdev = on_action.clone();
+    let parent_ref_hdev = parent.clone();
+    let window_ref_hdev = window.clone();
+    add_hostdev_btn.connect_clicked(move |_| {
+        crate::ui::add_hostdev_dialog::show_add_hostdev_dialog(
+            &parent_ref_hdev,
+            {
+                let on_action = on_action_hostdev.clone();
+                let wr = window_ref_hdev.clone();
+                move |info| {
+                    on_action(ConfigAction::AddHostdev(info));
+                    wr.close();
+                }
+            },
+        );
+    });
+
+    devices_page.add(&hostdev_group);
+
+    // --- Serial / Console Ports group ---
+    let serial_group = adw::PreferencesGroup::new();
+    serial_group.set_title("Serial & Console Ports");
+
+    let add_serial_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_serial_btn.set_tooltip_text(Some("Add Serial/Console Port"));
+    add_serial_btn.add_css_class("flat");
+    serial_group.set_header_suffix(Some(&add_serial_btn));
+
+    for s in &details.serials {
+        let row = adw::ActionRow::new();
+        row.set_title(&s.display_name());
+        row.set_subtitle(&s.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_sr = on_action.clone();
+        let s_clone = s.clone();
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_sr(ConfigAction::RemoveSerial(s_clone.clone()));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        serial_group.add(&row);
+    }
+
+    // Add serial form inline
+    let serial_add_group = adw::PreferencesGroup::new();
+
+    let serial_type_labels = ["VirtIO Console", "ISA Serial"];
+    let serial_type_list = gtk::StringList::new(&serial_type_labels);
+    let serial_type_row = adw::ComboRow::new();
+    serial_type_row.set_title("Port Type");
+    serial_type_row.set_model(Some(&serial_type_list));
+    serial_add_group.add(&serial_type_row);
+
+    let serial_apply_btn = gtk::Button::with_label("Add Port");
+    serial_apply_btn.add_css_class("suggested-action");
+    serial_apply_btn.add_css_class("pill");
+    serial_apply_btn.set_halign(gtk::Align::Center);
+    serial_apply_btn.set_margin_top(8);
+    let on_action_serial = on_action.clone();
+    let window_ref_serial = window.clone();
+    let next_port = details.serials.len() as u32;
+    serial_apply_btn.connect_clicked(move |_| {
+        let idx = serial_type_row.selected();
+        let (is_console, target_type) = if idx == 0 {
+            (true, "virtio".to_string())
+        } else {
+            (false, "isa-serial".to_string())
+        };
+        use crate::backend::types::SerialInfo;
+        on_action_serial(ConfigAction::AddSerial(SerialInfo {
+            is_console,
+            target_type,
+            port: next_port,
+        }));
+        window_ref_serial.close();
+    });
+    serial_add_group.add(&serial_apply_btn);
+
+    // Only show add form when + button clicked
+    serial_add_group.set_visible(false);
+    let serial_add_group_ref = serial_add_group.clone();
+    add_serial_btn.connect_clicked(move |_| {
+        serial_add_group_ref.set_visible(!serial_add_group_ref.is_visible());
+    });
+
+    devices_page.add(&serial_group);
+    devices_page.add(&serial_add_group);
+
+    // --- RNG group ---
+    let rng_group = adw::PreferencesGroup::new();
+    rng_group.set_title("Random Number Generator");
+
+    use crate::backend::types::RngBackend;
+    let rng_labels: Vec<&str> = {
+        let mut v: Vec<&str> = RngBackend::ALL.iter().map(|r| r.label()).collect();
+        v.push("None (disabled)");
+        v
+    };
+    let rng_str_labels: Vec<String> = rng_labels.iter().map(|s| s.to_string()).collect();
+    let rng_label_refs: Vec<&str> = rng_str_labels.iter().map(|s| s.as_str()).collect();
+    let rng_list = gtk::StringList::new(&rng_label_refs);
+    let rng_row = adw::ComboRow::new();
+    rng_row.set_title("Backend");
+    rng_row.set_model(Some(&rng_list));
+    let current_rng_idx = match details.rng {
+        Some(RngBackend::Random) => 0,
+        Some(RngBackend::Urandom) => 1,
+        None => 2,
+    };
+    rng_row.set_selected(current_rng_idx);
+    rng_group.add(&rng_row);
+
+    let rng_apply_btn = gtk::Button::with_label("Apply RNG");
+    rng_apply_btn.add_css_class("suggested-action");
+    rng_apply_btn.add_css_class("pill");
+    rng_apply_btn.set_halign(gtk::Align::Center);
+    rng_apply_btn.set_margin_top(8);
+    let on_action_rng = on_action.clone();
+    let window_ref_rng = window.clone();
+    rng_apply_btn.connect_clicked(move |_| {
+        let idx = rng_row.selected() as usize;
+        let backend = RngBackend::ALL.get(idx).copied();
+        on_action_rng(ConfigAction::ModifyRng(backend));
+        window_ref_rng.close();
+    });
+    rng_group.add(&rng_apply_btn);
+
+    devices_page.add(&rng_group);
+
+    // --- Watchdog group ---
+    let wd_group = adw::PreferencesGroup::new();
+    wd_group.set_title("Watchdog");
+
+    use crate::backend::types::{WatchdogAction, WatchdogModel};
+    let wd_model_labels: Vec<&str> = WatchdogModel::ALL.iter().map(|m| m.label()).collect();
+    let wd_model_list = gtk::StringList::new(&wd_model_labels);
+    let wd_model_row = adw::ComboRow::new();
+    wd_model_row.set_title("Model");
+    wd_model_row.set_model(Some(&wd_model_list));
+    let current_wd_model_idx = details
+        .watchdog
+        .as_ref()
+        .and_then(|w| WatchdogModel::ALL.iter().position(|m| *m == w.model))
+        .unwrap_or(WatchdogModel::ALL.len() - 1);
+    wd_model_row.set_selected(current_wd_model_idx as u32);
+    wd_group.add(&wd_model_row);
+
+    let wd_action_labels: Vec<&str> = WatchdogAction::ALL.iter().map(|a| a.label()).collect();
+    let wd_action_list = gtk::StringList::new(&wd_action_labels);
+    let wd_action_row = adw::ComboRow::new();
+    wd_action_row.set_title("Action");
+    wd_action_row.set_model(Some(&wd_action_list));
+    let current_wd_action_idx = details
+        .watchdog
+        .as_ref()
+        .and_then(|w| WatchdogAction::ALL.iter().position(|a| *a == w.action))
+        .unwrap_or(0);
+    wd_action_row.set_selected(current_wd_action_idx as u32);
+    wd_group.add(&wd_action_row);
+
+    let wd_apply_btn = gtk::Button::with_label("Apply Watchdog");
+    wd_apply_btn.add_css_class("suggested-action");
+    wd_apply_btn.add_css_class("pill");
+    wd_apply_btn.set_halign(gtk::Align::Center);
+    wd_apply_btn.set_margin_top(8);
+    let on_action_wd = on_action.clone();
+    let window_ref_wd = window.clone();
+    wd_apply_btn.connect_clicked(move |_| {
+        let model = WatchdogModel::ALL
+            .get(wd_model_row.selected() as usize)
+            .copied()
+            .unwrap_or(WatchdogModel::None);
+        let action = WatchdogAction::ALL
+            .get(wd_action_row.selected() as usize)
+            .copied()
+            .unwrap_or(WatchdogAction::Reset);
+        on_action_wd(ConfigAction::ModifyWatchdog(model, action));
+        window_ref_wd.close();
+    });
+    wd_group.add(&wd_apply_btn);
+
+    devices_page.add(&wd_group);
+
     window.add(&devices_page);
 
     // --- Display page ---

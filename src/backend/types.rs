@@ -803,6 +803,7 @@ pub struct NewDiskParams {
 pub struct NewNetworkParams {
     pub source_network: String,
     pub model_type: String,
+    pub mac_address: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -833,6 +834,12 @@ pub enum ConfigAction {
     ModifyTpm(TpmModel),
     AddFilesystem(FilesystemInfo),
     RemoveFilesystem(String),
+    AddHostdev(HostdevInfo),
+    RemoveHostdev(HostdevInfo),
+    AddSerial(SerialInfo),
+    RemoveSerial(SerialInfo),
+    ModifyRng(Option<RngBackend>),
+    ModifyWatchdog(WatchdogModel, WatchdogAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -929,6 +936,214 @@ pub struct NetworkInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct HostdevInfo {
+    pub device_type: String,       // "pci" or "usb"
+    pub pci_domain: Option<String>,
+    pub pci_bus: Option<String>,
+    pub pci_slot: Option<String>,
+    pub pci_function: Option<String>,
+    pub usb_vendor: Option<String>,
+    pub usb_product: Option<String>,
+    pub display_name: String,
+}
+
+impl HostdevInfo {
+    pub fn address_key(&self) -> String {
+        if self.device_type == "pci" {
+            format!(
+                "pci:{}:{}:{}:{}",
+                self.pci_domain.as_deref().unwrap_or("0x0000"),
+                self.pci_bus.as_deref().unwrap_or("0x00"),
+                self.pci_slot.as_deref().unwrap_or("0x00"),
+                self.pci_function.as_deref().unwrap_or("0x0")
+            )
+        } else {
+            format!(
+                "usb:{}:{}",
+                self.usb_vendor.as_deref().unwrap_or(""),
+                self.usb_product.as_deref().unwrap_or("")
+            )
+        }
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        if self.device_type == "pci" {
+            format!(
+                "PCI {}:{}:{}.{}",
+                self.pci_domain.as_deref().unwrap_or("0000").trim_start_matches("0x"),
+                self.pci_bus.as_deref().unwrap_or("00").trim_start_matches("0x"),
+                self.pci_slot.as_deref().unwrap_or("00").trim_start_matches("0x"),
+                self.pci_function.as_deref().unwrap_or("0").trim_start_matches("0x"),
+            )
+        } else {
+            format!(
+                "USB {}:{}",
+                self.usb_vendor.as_deref().unwrap_or(""),
+                self.usb_product.as_deref().unwrap_or("")
+            )
+        }
+    }
+}
+
+// --- Serial / Console Types ---
+
+#[derive(Debug, Clone)]
+pub struct SerialInfo {
+    pub is_console: bool,    // true = <console> element, false = <serial>
+    pub target_type: String, // "isa-serial", "virtio", "serial"
+    pub port: u32,
+}
+
+impl SerialInfo {
+    pub fn display_name(&self) -> String {
+        let kind = if self.is_console { "Console" } else { "Serial" };
+        format!("{} Port {}", kind, self.port)
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        let kind = if self.is_console { "console" } else { "serial" };
+        format!("type=pty, target={} ({})", self.target_type, kind)
+    }
+}
+
+// --- RNG Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RngBackend {
+    Random,
+    Urandom,
+}
+
+impl RngBackend {
+    pub const ALL: &'static [RngBackend] = &[RngBackend::Random, RngBackend::Urandom];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            RngBackend::Random => "/dev/random",
+            RngBackend::Urandom => "/dev/urandom",
+        }
+    }
+
+    pub fn path(&self) -> &'static str {
+        match self {
+            RngBackend::Random => "/dev/random",
+            RngBackend::Urandom => "/dev/urandom",
+        }
+    }
+
+    pub fn from_path(s: &str) -> Option<Self> {
+        match s {
+            "/dev/random" => Some(RngBackend::Random),
+            "/dev/urandom" => Some(RngBackend::Urandom),
+            _ => Some(RngBackend::Urandom),
+        }
+    }
+}
+
+// --- Watchdog Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchdogModel {
+    I6300esb,
+    Ib700,
+    Diag288,
+    None,
+}
+
+impl WatchdogModel {
+    pub const ALL: &'static [WatchdogModel] = &[
+        WatchdogModel::I6300esb,
+        WatchdogModel::Ib700,
+        WatchdogModel::Diag288,
+        WatchdogModel::None,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            WatchdogModel::I6300esb => "i6300esb",
+            WatchdogModel::Ib700 => "ib700",
+            WatchdogModel::Diag288 => "diag288",
+            WatchdogModel::None => "None (disabled)",
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WatchdogModel::I6300esb => "i6300esb",
+            WatchdogModel::Ib700 => "ib700",
+            WatchdogModel::Diag288 => "diag288",
+            WatchdogModel::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "i6300esb" => WatchdogModel::I6300esb,
+            "ib700" => WatchdogModel::Ib700,
+            "diag288" => WatchdogModel::Diag288,
+            _ => WatchdogModel::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchdogAction {
+    Reset,
+    Shutdown,
+    Poweroff,
+    Pause,
+    None,
+}
+
+impl WatchdogAction {
+    pub const ALL: &'static [WatchdogAction] = &[
+        WatchdogAction::Reset,
+        WatchdogAction::Shutdown,
+        WatchdogAction::Poweroff,
+        WatchdogAction::Pause,
+        WatchdogAction::None,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            WatchdogAction::Reset => "Reset",
+            WatchdogAction::Shutdown => "Shutdown",
+            WatchdogAction::Poweroff => "Power Off",
+            WatchdogAction::Pause => "Pause",
+            WatchdogAction::None => "None",
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WatchdogAction::Reset => "reset",
+            WatchdogAction::Shutdown => "shutdown",
+            WatchdogAction::Poweroff => "poweroff",
+            WatchdogAction::Pause => "pause",
+            WatchdogAction::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "reset" => WatchdogAction::Reset,
+            "shutdown" => WatchdogAction::Shutdown,
+            "poweroff" => WatchdogAction::Poweroff,
+            "pause" => WatchdogAction::Pause,
+            _ => WatchdogAction::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WatchdogInfo {
+    pub model: WatchdogModel,
+    pub action: WatchdogAction,
+}
+
+// --- Domain Details ---
+
+#[derive(Debug, Clone)]
 pub struct DomainDetails {
     pub name: String,
     pub uuid: String,
@@ -949,4 +1164,8 @@ pub struct DomainDetails {
     pub cpu_tune: CpuTune,
     pub tpm: Option<TpmInfo>,
     pub filesystems: Vec<FilesystemInfo>,
+    pub hostdevs: Vec<HostdevInfo>,
+    pub serials: Vec<SerialInfo>,
+    pub rng: Option<RngBackend>,
+    pub watchdog: Option<WatchdogInfo>,
 }

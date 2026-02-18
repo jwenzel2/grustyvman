@@ -1,7 +1,8 @@
 use crate::backend::types::{
     BootDevice, CpuMode, CpuTune, DiskInfo, DomainDetails, FilesystemInfo, FirmwareType,
-    GraphicsInfo, GraphicsType, NetworkInfo, NewDiskParams, NewNetworkParams, SoundInfo, SoundModel,
-    TpmInfo, TpmModel, VcpuPin, VideoInfo, VideoModel,
+    GraphicsInfo, GraphicsType, HostdevInfo, NetworkInfo, NewDiskParams, NewNetworkParams,
+    RngBackend, SerialInfo, SoundInfo, SoundModel, TpmInfo, TpmModel, VcpuPin, VideoInfo,
+    VideoModel, WatchdogAction, WatchdogInfo, WatchdogModel,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -192,6 +193,10 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         cpu_tune: CpuTune::default(),
         tpm: None,
         filesystems: Vec::new(),
+        hostdevs: Vec::new(),
+        serials: Vec::new(),
+        rng: None,
+        watchdog: None,
     };
 
     #[derive(Debug)]
@@ -230,6 +235,17 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         accessmode: Option<String>,
     }
 
+    #[derive(Debug, Default)]
+    struct HostdevBuilder {
+        device_type: String,
+        pci_domain: Option<String>,
+        pci_bus: Option<String>,
+        pci_slot: Option<String>,
+        pci_function: Option<String>,
+        usb_vendor: Option<String>,
+        usb_product: Option<String>,
+    }
+
     let mut context = Context::None;
     let mut in_devices = false;
     let mut in_os = false;
@@ -241,6 +257,15 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     let mut tpm_version = String::new();
     let mut in_filesystem = false;
     let mut fs_builder = FilesystemBuilder::default();
+    let mut in_hostdev = false;
+    let mut hostdev_builder = HostdevBuilder::default();
+    // Serial/console parsing state
+    let mut in_serial = false;
+    let mut serial_is_console = false;
+    let mut serial_target_type = String::new();
+    let mut serial_port: u32 = 0;
+    // RNG / watchdog flags
+    let mut in_rng = false;
     let mut os_arch = String::new();
 
     loop {
@@ -543,6 +568,90 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                             }
                         }
                     }
+                    "serial" if in_devices => {
+                        in_serial = true;
+                        serial_is_console = false;
+                        serial_target_type = String::new();
+                        serial_port = 0;
+                    }
+                    "console" if in_devices => {
+                        in_serial = true;
+                        serial_is_console = true;
+                        serial_target_type = String::new();
+                        serial_port = 0;
+                    }
+                    "target" if in_serial => {
+                        for attr in e.attributes().flatten() {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            match attr.key.as_ref() {
+                                b"type" => serial_target_type = val,
+                                b"port" => serial_port = val.parse().unwrap_or(0),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "rng" if in_devices => {
+                        in_rng = true;
+                        // default to urandom, updated when we see backend text
+                        details.rng = Some(RngBackend::Urandom);
+                    }
+                    "backend" if in_rng => {
+                        // will get path from Text event
+                    }
+                    "watchdog" if in_devices => {
+                        let mut model = WatchdogModel::None;
+                        let mut action = WatchdogAction::Reset;
+                        for attr in e.attributes().flatten() {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            match attr.key.as_ref() {
+                                b"model" => model = WatchdogModel::from_str(&val),
+                                b"action" => action = WatchdogAction::from_str(&val),
+                                _ => {}
+                            }
+                        }
+                        if model != WatchdogModel::None {
+                            details.watchdog = Some(WatchdogInfo { model, action });
+                        }
+                    }
+                    "hostdev" if in_devices => {
+                        in_hostdev = true;
+                        hostdev_builder = HostdevBuilder::default();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"type" {
+                                hostdev_builder.device_type =
+                                    String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    "address" if in_hostdev => {
+                        for attr in e.attributes().flatten() {
+                            let key = attr.key.as_ref().to_vec();
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            match key.as_slice() {
+                                b"domain" => hostdev_builder.pci_domain = Some(val),
+                                b"bus" => hostdev_builder.pci_bus = Some(val),
+                                b"slot" => hostdev_builder.pci_slot = Some(val),
+                                b"function" => hostdev_builder.pci_function = Some(val),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "vendor" if in_hostdev => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"id" {
+                                hostdev_builder.usb_vendor =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    }
+                    "product" if in_hostdev => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"id" {
+                                hostdev_builder.usb_product =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -574,7 +683,12 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                         details.cpu_model = Some(text);
                         context = Context::None;
                     }
-                    _ => {}
+                    _ => {
+                        // RNG backend path (text inside <backend>)
+                        if in_rng && !text.trim().is_empty() {
+                            details.rng = RngBackend::from_path(text.trim());
+                        }
+                    }
                 }
             }
             Ok(Event::End(ref e)) => {
@@ -649,6 +763,54 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                                 source_network: ib.source_network,
                                 model_type: ib.model_type,
                             });
+                        }
+                    }
+                    "serial" | "console" => {
+                        if in_serial {
+                            details.serials.push(SerialInfo {
+                                is_console: serial_is_console,
+                                target_type: if serial_target_type.is_empty() {
+                                    "isa-serial".to_string()
+                                } else {
+                                    serial_target_type.clone()
+                                },
+                                port: serial_port,
+                            });
+                            in_serial = false;
+                        }
+                    }
+                    "rng" => {
+                        in_rng = false;
+                    }
+                    "hostdev" => {
+                        if in_hostdev {
+                            let display_name = if hostdev_builder.device_type == "pci" {
+                                format!(
+                                    "PCI {}:{}:{}.{}",
+                                    hostdev_builder.pci_domain.as_deref().unwrap_or("0000").trim_start_matches("0x"),
+                                    hostdev_builder.pci_bus.as_deref().unwrap_or("00").trim_start_matches("0x"),
+                                    hostdev_builder.pci_slot.as_deref().unwrap_or("00").trim_start_matches("0x"),
+                                    hostdev_builder.pci_function.as_deref().unwrap_or("0").trim_start_matches("0x"),
+                                )
+                            } else {
+                                format!(
+                                    "USB {}:{}",
+                                    hostdev_builder.usb_vendor.as_deref().unwrap_or(""),
+                                    hostdev_builder.usb_product.as_deref().unwrap_or(""),
+                                )
+                            };
+                            details.hostdevs.push(HostdevInfo {
+                                device_type: hostdev_builder.device_type.clone(),
+                                pci_domain: hostdev_builder.pci_domain.clone(),
+                                pci_bus: hostdev_builder.pci_bus.clone(),
+                                pci_slot: hostdev_builder.pci_slot.clone(),
+                                pci_function: hostdev_builder.pci_function.clone(),
+                                usb_vendor: hostdev_builder.usb_vendor.clone(),
+                                usb_product: hostdev_builder.usb_product.clone(),
+                                display_name,
+                            });
+                            in_hostdev = false;
+                            hostdev_builder = HostdevBuilder::default();
                         }
                     }
                     _ => {}
@@ -1509,9 +1671,15 @@ pub fn add_network_device(xml: &str, params: &NewNetworkParams) -> Result<String
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
 
+    let mac_elem = params
+        .mac_address
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .map(|m| format!(r#"<mac address="{}"/>"#, m))
+        .unwrap_or_default();
     let iface_xml = format!(
-        r#"<interface type="network"><source network="{}"/><model type="{}"/></interface>"#,
-        params.source_network, params.model_type,
+        r#"<interface type="network">{}<source network="{}"/><model type="{}"/></interface>"#,
+        mac_elem, params.source_network, params.model_type,
     );
 
     loop {
@@ -2315,6 +2483,704 @@ pub fn remove_filesystem(xml: &str, target_dir: &str) -> Result<String, AppError
             Ok(Event::Eof) => break,
             Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
             _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn add_hostdev_device(xml: &str, info: &HostdevInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let hostdev_xml = if info.device_type == "pci" {
+        format!(
+            r#"<hostdev mode="subsystem" type="pci" managed="yes"><source><address domain="{}" bus="{}" slot="{}" function="{}"/></source></hostdev>"#,
+            info.pci_domain.as_deref().unwrap_or("0x0000"),
+            info.pci_bus.as_deref().unwrap_or("0x00"),
+            info.pci_slot.as_deref().unwrap_or("0x00"),
+            info.pci_function.as_deref().unwrap_or("0x0"),
+        )
+    } else {
+        format!(
+            r#"<hostdev mode="subsystem" type="usb" managed="yes"><source><vendor id="{}"/><product id="{}"/></source></hostdev>"#,
+            info.usb_vendor.as_deref().unwrap_or(""),
+            info.usb_product.as_deref().unwrap_or(""),
+        )
+    };
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&hostdev_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_hostdev_device(xml: &str, info: &HostdevInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut hostdev_buffer = String::new();
+    let mut hostdev_depth = 0u32;
+    let mut in_hostdev = false;
+    let mut is_match = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_hostdev {
+                    hostdev_depth += 1;
+                    hostdev_buffer.push('<');
+                    write_element(&mut hostdev_buffer, e);
+                    hostdev_buffer.push('>');
+                    continue;
+                }
+
+                if name == "hostdev" {
+                    in_hostdev = true;
+                    hostdev_depth = 1;
+                    hostdev_buffer.clear();
+                    is_match = false;
+                    hostdev_buffer.push('<');
+                    write_element(&mut hostdev_buffer, e);
+                    hostdev_buffer.push('>');
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_hostdev {
+                    hostdev_depth -= 1;
+                    hostdev_buffer.push_str(&format!("</{name}>"));
+                    if hostdev_depth == 0 {
+                        in_hostdev = false;
+                        if !is_match {
+                            result.push_str(&hostdev_buffer);
+                        }
+                        hostdev_buffer.clear();
+                    }
+                    continue;
+                }
+
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_hostdev {
+                    let elem_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if info.device_type == "pci" && elem_name == "address" {
+                        let mut dom_match = info.pci_domain.is_none();
+                        let mut bus_match = false;
+                        let mut slot_match = false;
+                        let mut func_match = false;
+                        for attr in e.attributes().flatten() {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            match attr.key.as_ref() {
+                                b"domain" => {
+                                    if info.pci_domain.as_deref() == Some(val.as_str()) {
+                                        dom_match = true;
+                                    }
+                                }
+                                b"bus" => {
+                                    if info.pci_bus.as_deref() == Some(val.as_str()) {
+                                        bus_match = true;
+                                    }
+                                }
+                                b"slot" => {
+                                    if info.pci_slot.as_deref() == Some(val.as_str()) {
+                                        slot_match = true;
+                                    }
+                                }
+                                b"function" => {
+                                    if info.pci_function.as_deref() == Some(val.as_str()) {
+                                        func_match = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if dom_match && bus_match && slot_match && func_match {
+                            is_match = true;
+                        }
+                    }
+                    if info.device_type == "usb" {
+                        if elem_name == "vendor" {
+                            let mut vendor_ok = false;
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"id" {
+                                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                                    if info.usb_vendor.as_deref() == Some(val.as_str()) {
+                                        vendor_ok = true;
+                                    }
+                                }
+                            }
+                            if vendor_ok {
+                                is_match = true;
+                            }
+                        }
+                        if elem_name == "product" {
+                            let mut prod_ok = false;
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"id" {
+                                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                                    if info.usb_product.as_deref() == Some(val.as_str()) {
+                                        prod_ok = true;
+                                    }
+                                }
+                            }
+                            if !prod_ok {
+                                is_match = false;
+                            }
+                        }
+                    }
+                    hostdev_buffer.push('<');
+                    write_element(&mut hostdev_buffer, e);
+                    hostdev_buffer.push_str("/>");
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_hostdev {
+                    hostdev_buffer.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Rename ----
+
+pub fn rename_domain_xml(xml: &str, new_name: &str) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_name = false;
+    let mut name_written = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "name" && !name_written {
+                    in_name = true;
+                    result.push('<');
+                    write_element(&mut result, e);
+                    result.push('>');
+                } else {
+                    result.push('<');
+                    write_element(&mut result, e);
+                    result.push('>');
+                }
+            }
+            Ok(Event::Text(ref e)) => {
+                if in_name {
+                    result.push_str(new_name);
+                } else {
+                    let text = e.unescape().unwrap_or_default().to_string();
+                    result.push_str(&text);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "name" && in_name {
+                    in_name = false;
+                    name_written = true;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Clone helpers ----
+
+/// Extract source file paths of disk images (skips CDROMs with no source).
+pub fn extract_disk_paths(xml: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut in_disk = false;
+    let mut is_cdrom = false;
+    let mut source_file: Option<String> = None;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "disk" => {
+                        in_disk = true;
+                        is_cdrom = false;
+                        source_file = None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"device" {
+                                let val = String::from_utf8_lossy(&attr.value).to_string();
+                                if val == "cdrom" {
+                                    is_cdrom = true;
+                                }
+                            }
+                        }
+                    }
+                    "source" if in_disk => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"file" {
+                                source_file = Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "disk" && in_disk {
+                    if !is_cdrom {
+                        if let Some(p) = source_file.take() {
+                            paths.push(p);
+                        }
+                    }
+                    in_disk = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+    }
+
+    paths
+}
+
+/// Prepare XML for a VM clone: new name, no UUID (libvirt assigns one),
+/// updated disk paths, and MAC addresses removed (libvirt assigns new ones).
+pub fn prepare_clone_xml(
+    xml: &str,
+    new_name: &str,
+    disk_map: &[(String, String)],
+) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_name = false;
+    let mut name_written = false;
+    let mut skip_uuid = false;
+    let mut uuid_depth = 0u32;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "name" && !name_written {
+                    in_name = true;
+                    result.push('<');
+                    write_element(&mut result, e);
+                    result.push('>');
+                } else if ename == "uuid" {
+                    // Skip the uuid element entirely
+                    skip_uuid = true;
+                    uuid_depth = 1;
+                } else if skip_uuid {
+                    uuid_depth += 1;
+                } else {
+                    result.push('<');
+                    write_element(&mut result, e);
+                    result.push('>');
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                if skip_uuid {
+                    continue;
+                }
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                // Remove <mac> elements (libvirt assigns new ones)
+                if ename == "mac" {
+                    continue;
+                }
+                // Update disk source file paths
+                if ename == "source" {
+                    let mut updated = false;
+                    let attrs: Vec<_> = e.attributes().flatten().collect();
+                    for attr in &attrs {
+                        if attr.key.as_ref() == b"file" {
+                            let orig = String::from_utf8_lossy(&attr.value).to_string();
+                            if let Some((_, new_path)) = disk_map.iter().find(|(s, _)| *s == orig) {
+                                result.push_str(&format!(r#"<source file="{}"/>"#, new_path));
+                                updated = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !updated {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push_str("/>");
+                    }
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                if skip_uuid {
+                    continue;
+                }
+                if in_name {
+                    result.push_str(new_name);
+                } else {
+                    let text = e.unescape().unwrap_or_default().to_string();
+                    result.push_str(&text);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if skip_uuid {
+                    uuid_depth -= 1;
+                    if uuid_depth == 0 {
+                        skip_uuid = false;
+                    }
+                    continue;
+                }
+                if ename == "name" && in_name {
+                    in_name = false;
+                    name_written = true;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                if skip_uuid {
+                    continue;
+                }
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Serial / Console ----
+
+pub fn add_serial_device(xml: &str, info: &SerialInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let serial_xml = if info.is_console {
+        format!(
+            r#"<console type="pty"><target type="{}" port="{}"/></console>"#,
+            info.target_type, info.port
+        )
+    } else {
+        format!(
+            r#"<serial type="pty"><target type="{}" port="{}"/></serial>"#,
+            info.target_type, info.port
+        )
+    };
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&serial_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_serial_device(xml: &str, info: &SerialInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let target_tag = if info.is_console { "console" } else { "serial" };
+
+    let mut buf = String::new();
+    let mut depth = 0u32;
+    let mut in_elem = false;
+    let mut found_match = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_elem {
+                    depth += 1;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                if ename == target_tag {
+                    in_elem = true;
+                    depth = 1;
+                    buf.clear();
+                    found_match = false;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_elem {
+                    let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if ename == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"port" {
+                                let val: u32 = String::from_utf8_lossy(&attr.value)
+                                    .parse()
+                                    .unwrap_or(u32::MAX);
+                                if val == info.port {
+                                    found_match = true;
+                                }
+                            }
+                        }
+                    }
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push_str("/>");
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_elem {
+                    depth -= 1;
+                    buf.push_str(&format!("</{ename}>"));
+                    if depth == 0 {
+                        in_elem = false;
+                        if !found_match {
+                            result.push_str(&buf);
+                        }
+                        buf.clear();
+                    }
+                    continue;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_elem {
+                    buf.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- RNG ----
+
+pub fn modify_rng(xml: &str, backend: Option<RngBackend>) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match ename.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "rng" if in_devices => {
+                        // Skip existing rng element
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "devices" {
+                    if let Some(b) = backend {
+                        result.push_str(&format!(
+                            r#"<rng model="virtio"><backend model="random">{}</backend></rng>"#,
+                            b.path()
+                        ));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Watchdog ----
+
+pub fn modify_watchdog(
+    xml: &str,
+    model: WatchdogModel,
+    action: WatchdogAction,
+) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match ename.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                // Skip existing watchdog; new one injected at </devices>
+                if ename == "watchdog" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "devices" {
+                    if model != WatchdogModel::None {
+                        result.push_str(&format!(
+                            r#"<watchdog model="{}" action="{}"/>"#,
+                            model.as_str(),
+                            action.as_str()
+                        ));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
         }
     }
 

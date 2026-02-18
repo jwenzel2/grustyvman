@@ -129,3 +129,71 @@ pub fn launch_console(uri: &str, uuid: &str) -> Result<(), AppError> {
         .spawn()?;
     Ok(())
 }
+
+/// Rename a shutoff domain by redefining it with a new name.
+pub fn rename_domain(uri: &str, uuid: &str, new_name: &str) -> Result<(), AppError> {
+    let xml = get_domain_xml(uri, uuid)?;
+    let new_xml = crate::backend::domain_xml::rename_domain_xml(&xml, new_name)?;
+    // Undefine old, define new
+    with_domain(uri, uuid, |domain| {
+        domain.undefine()?;
+        Ok(())
+    })?;
+    update_domain_xml(uri, &new_xml)?;
+    Ok(())
+}
+
+/// Clone a shutoff domain. If `full_clone` is true, copies disk images fully;
+/// otherwise creates linked (backing-store) clones.
+pub fn clone_domain(
+    uri: &str,
+    uuid: &str,
+    new_name: &str,
+    full_clone: bool,
+) -> Result<(), AppError> {
+    let xml = get_domain_xml(uri, uuid)?;
+    let disk_paths = crate::backend::domain_xml::extract_disk_paths(&xml);
+
+    let disk_map: Vec<(String, String)> = disk_paths
+        .iter()
+        .map(|path| {
+            let new_path = derive_clone_path(path, new_name);
+            (path.clone(), new_path)
+        })
+        .collect();
+
+    for (src, dst) in &disk_map {
+        let args: &[&str] = if full_clone {
+            &["convert", "-f", "qcow2", "-O", "qcow2", src.as_str(), dst.as_str()]
+        } else {
+            &["create", "-f", "qcow2", "-F", "qcow2", "-b", src.as_str(), dst.as_str()]
+        };
+        let output = std::process::Command::new("qemu-img").args(args).output()?;
+        if !output.status.success() {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "qemu-img failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            )));
+        }
+    }
+
+    let new_xml = crate::backend::domain_xml::prepare_clone_xml(&xml, new_name, &disk_map)?;
+    update_domain_xml(uri, &new_xml)?;
+    Ok(())
+}
+
+fn derive_clone_path(original: &str, new_name: &str) -> String {
+    let path = std::path::Path::new(original);
+    let parent = path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    format!("{}/{}{}", parent, new_name, ext)
+}

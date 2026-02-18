@@ -1,5 +1,8 @@
 pub mod add_disk_dialog;
+pub mod add_hostdev_dialog;
 pub mod add_network_dialog;
+pub mod clone_vm_dialog;
+pub mod rename_vm_dialog;
 pub mod host_details_view;
 pub mod create_network_dialog;
 pub mod create_pool_dialog;
