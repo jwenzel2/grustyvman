@@ -43,7 +43,37 @@ extern "C" {
     ) -> *mut GrvViewer;
 
     fn grv_viewer_show(viewer: *mut GrvViewer);
+
+    /// Switch the viewer to the powered-off page.  Must be called on the GTK
+    /// main thread (use via g_idle_add from background threads).
+    fn grv_viewer_set_powered_off(viewer: *mut GrvViewer);
 }
+
+// ---------------------------------------------------------------------------
+// GLib idle-add for cross-thread GTK calls
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    /// Schedule `func(data)` to run on the GLib main loop thread.
+    /// Returns the GSource ID (we don't need it so we ignore it).
+    fn g_idle_add(
+        func: unsafe extern "C" fn(*mut c_void) -> c_int,
+        data: *mut c_void,
+    ) -> u32;
+}
+
+/// GLib idle callback: switches the viewer to the powered-off screen.
+/// The `data` pointer is the `GrvViewer *` cast to `*mut c_void`.
+unsafe extern "C" fn idle_set_powered_off(data: *mut c_void) -> c_int {
+    grv_viewer_set_powered_off(data as *mut GrvViewer);
+    0 // G_SOURCE_REMOVE — run only once
+}
+
+/// Integer-encoded viewer pointer for safe cross-thread transfer.
+/// Raw pointers are not Send; storing the address as `usize` sidesteps that
+/// while keeping the semantics identical (single-writer, GTK-main-thread-only
+/// receiver via g_idle_add).
+struct ViewerHandle(usize);
 
 // ---------------------------------------------------------------------------
 // FFI: GTK3 main loop (transitively linked via spice-client-gtk-3.0)
@@ -94,6 +124,26 @@ impl VmControl {
         self.with_domain(|d| d.destroy())?;
         std::thread::sleep(std::time::Duration::from_millis(400));
         self.with_domain(|d| d.create())
+    }
+
+    /// Returns `true` when the VM has an active SPICE server (running or
+    /// paused).  Returns `true` on transient libvirt errors to avoid spurious
+    /// "powered off" flashes.  Returns `false` when the domain is shut off,
+    /// crashed, or cannot be found.
+    fn is_active(&self) -> bool {
+        let conn = match Connect::open(Some(&self.uri)) {
+            Ok(c) => c,
+            Err(_) => return true, // treat connection error as "still up"
+        };
+        match Domain::lookup_by_uuid_string(&conn, &self.uuid) {
+            Ok(domain) => match domain.get_state() {
+                // VIR_DOMAIN_RUNNING=1, VIR_DOMAIN_BLOCKED=2,
+                // VIR_DOMAIN_PAUSED=3, VIR_DOMAIN_SHUTDOWN=4 (still has SPICE)
+                Ok((state, _)) => matches!(state, 1 | 2 | 3 | 4),
+                Err(_) => true,
+            },
+            Err(_) => false, // domain gone → treat as shutoff
+        }
     }
 }
 
@@ -177,12 +227,17 @@ fn main() {
     let password_c = CString::new(args.password.as_str()).expect("password contains NUL");
     let title_c    = CString::new(args.title.as_str()).expect("title contains NUL");
 
+    // Keep copies of uri/uuid for the libvirt polling thread.
+    let poll_uri  = args.uri.clone();
+    let poll_uuid = args.uuid.clone();
+
     // Heap-allocate VmControl so it lives for the duration of the process and
     // can be handed to C as a stable pointer.
     let vm = Box::new(VmControl { uri: args.uri, uuid: args.uuid });
     let vm_ptr = Box::into_raw(vm);
 
-    unsafe {
+    // ── GTK / SPICE setup (unsafe) ─────────────────────────────────────────
+    let viewer_handle = unsafe {
         gtk_init(std::ptr::null_mut(), std::ptr::null_mut());
 
         // Create the SPICE session (not yet connected).
@@ -211,9 +266,36 @@ fn main() {
         // Begin async SPICE connection (driven by GTK's GLib main loop).
         grv_session_connect(session);
 
-        gtk_main();
+        ViewerHandle(viewer as usize)
+    };
 
-        // gtk_main() returns when the window is closed.
+    // ── Libvirt polling thread (safe spawn, unsafe g_idle_add inside) ───────
+    // For orderly ACPI shutdowns, QEMU keeps the SPICE server alive after the
+    // guest OS stops, so SPICE_CHANNEL_CLOSED is never emitted and the display
+    // just freezes.  We poll libvirt every 2 s and schedule the powered-off
+    // screen via g_idle_add when the VM is no longer active.
+    std::thread::spawn(move || {
+        let poll_vm = VmControl { uri: poll_uri, uuid: poll_uuid };
+        // Brief initial delay so we don't fire during VM boot.
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if !poll_vm.is_active() {
+                // g_idle_add schedules the callback on the GLib main-loop thread.
+                unsafe {
+                    g_idle_add(
+                        idle_set_powered_off,
+                        viewer_handle.0 as *mut c_void,
+                    );
+                }
+                break;
+            }
+        }
+    });
+
+    // ── Run the GTK main loop ───────────────────────────────────────────────
+    unsafe {
+        gtk_main();
         // Reclaim VmControl to avoid the leak warning.
         drop(Box::from_raw(vm_ptr));
     }

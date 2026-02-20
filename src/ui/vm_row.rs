@@ -76,24 +76,47 @@ impl VmRow {
     }
 
     pub fn bind(&self, vm: &crate::models::vm_object::VmObject) {
-        let imp = self.imp();
+        // ── Initial values ───────────────────────────────────────────────
+        self.apply_state_css(vm.state_css());
+        if let Some(ref label) = *self.imp().name_label.borrow() {
+            label.set_label(&vm.name());
+        }
+        if let Some(ref label) = *self.imp().subtitle_label.borrow() {
+            label.set_label(&vm.subtitle());
+        }
 
+        // ── Live update: state dot color ─────────────────────────────────
+        let row = self.clone();
+        vm.connect_state_css_notify(move |vm| {
+            row.apply_state_css(vm.state_css());
+        });
+
+        // ── Live update: subtitle (vCPUs / memory / state text) ──────────
+        let row = self.clone();
+        vm.connect_subtitle_notify(move |vm| {
+            if let Some(ref label) = *row.imp().subtitle_label.borrow() {
+                label.set_label(&vm.subtitle());
+            }
+        });
+
+        // ── Live update: name (rename support) ───────────────────────────
+        let row = self.clone();
+        vm.connect_name_notify(move |vm| {
+            if let Some(ref label) = *row.imp().name_label.borrow() {
+                label.set_label(&vm.name());
+            }
+        });
+    }
+
+    fn apply_state_css(&self, new_css: String) {
+        let imp = self.imp();
         if let Some(ref dot) = *imp.status_dot.borrow() {
             let old_css = imp.current_css.borrow().clone();
             if !old_css.is_empty() {
                 dot.remove_css_class(&old_css);
             }
-            let new_css = vm.state_css();
             dot.add_css_class(&new_css);
             *imp.current_css.borrow_mut() = new_css;
-        }
-
-        if let Some(ref label) = *imp.name_label.borrow() {
-            label.set_label(&vm.name());
-        }
-
-        if let Some(ref label) = *imp.subtitle_label.borrow() {
-            label.set_label(&vm.subtitle());
         }
     }
 }

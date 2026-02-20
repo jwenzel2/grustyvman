@@ -477,3 +477,12 @@ grv_viewer_show(GrvViewer *v)
 {
     gtk_widget_show_all(v->window);
 }
+
+/* Called from the Rust libvirt-polling thread via g_idle_add to switch the
+ * viewer to the powered-off page.  Must be invoked on the GTK main thread. */
+void
+grv_viewer_set_powered_off(GrvViewer *v)
+{
+    show_powered_off(v, "VM Powered Off",
+                     "The virtual machine has stopped.");
+}
