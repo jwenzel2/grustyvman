@@ -1092,6 +1092,7 @@ impl Window {
 
             if let Some(vm_info) = vms.iter().find(|v| v.uuid == *uuid) {
                 self.imp().view_switcher_title.set_subtitle(vm_info.state.label());
+                self.imp().details_view.update_runtime_status(vm_info.state.label(), vm_info.id);
 
                 if vm_info.state != backend::types::VmState::Running {
                     self.stop_perf_sampling();

@@ -38,6 +38,15 @@ pub fn collect_perf_sample(
         }
     }
 
+    // Interface target names (vnetX) can change on power-cycle/reconnect.
+    // Prefer live targets from current runtime XML, then fall back to cached.
+    let live_iface_targets = domain
+        .get_xml_desc(0)
+        .ok()
+        .map(|xml| crate::backend::domain_xml::extract_interface_targets(&xml))
+        .filter(|targets| !targets.is_empty());
+    let iface_targets = live_iface_targets.as_deref().unwrap_or(iface_targets);
+
     // Sum network I/O across all interface targets
     let mut net_rx_bytes: i64 = 0;
     let mut net_tx_bytes: i64 = 0;

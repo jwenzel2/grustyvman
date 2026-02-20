@@ -12,6 +12,7 @@
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use virt::connect::Connect;
 use virt::domain::Domain;
@@ -47,6 +48,15 @@ extern "C" {
     /// Switch the viewer to the powered-off page.  Must be called on the GTK
     /// main thread (use via g_idle_add from background threads).
     fn grv_viewer_set_powered_off(viewer: *mut GrvViewer);
+
+    /// Reconfigure session host/port/password and reconnect. Must be called on
+    /// the GTK main thread.
+    fn grv_viewer_reconnect(
+        viewer: *mut GrvViewer,
+        host: *const c_char,
+        port: *const c_char,
+        password: *const c_char,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +85,11 @@ unsafe extern "C" fn idle_set_powered_off(data: *mut c_void) -> c_int {
 /// receiver via g_idle_add).
 struct ViewerHandle(usize);
 
+struct ActionContext {
+    vm: VmControl,
+    viewer_addr: AtomicUsize,
+}
+
 // ---------------------------------------------------------------------------
 // FFI: GTK3 main loop (transitively linked via spice-client-gtk-3.0)
 // ---------------------------------------------------------------------------
@@ -89,16 +104,23 @@ extern "C" {
 // ---------------------------------------------------------------------------
 
 /// Action IDs — must match the `#define GRV_ACTION_*` values in spice_helpers.c.
-const ACTION_PAUSE: i32        = 0;
-const ACTION_RESUME: i32       = 1;
-const ACTION_SHUTDOWN: i32     = 2;
-const ACTION_REBOOT: i32       = 3;
-const ACTION_FORCE_STOP: i32   = 4;
-const ACTION_FORCE_REBOOT: i32 = 5;
+const ACTION_POWER_ON: i32     = 0;
+const ACTION_PAUSE: i32        = 1;
+const ACTION_RESUME: i32       = 2;
+const ACTION_SHUTDOWN: i32     = 3;
+const ACTION_REBOOT: i32       = 4;
+const ACTION_FORCE_STOP: i32   = 5;
+const ACTION_FORCE_REBOOT: i32 = 6;
 
 struct VmControl {
     uri: String,
     uuid: String,
+}
+
+struct SpiceEndpoint {
+    host: String,
+    port: String,
+    password: String,
 }
 
 impl VmControl {
@@ -113,6 +135,7 @@ impl VmControl {
         f(&domain).map(|_| ()).map_err(|e| format!("{e}"))
     }
 
+    fn start(&self)        -> Result<(), String> { self.with_domain(|d| d.create()) }
     fn pause(&self)        -> Result<(), String> { self.with_domain(|d| d.suspend()) }
     fn resume(&self)       -> Result<(), String> { self.with_domain(|d| d.resume()) }
     fn shutdown(&self)     -> Result<(), String> { self.with_domain(|d| d.shutdown()) }
@@ -124,6 +147,25 @@ impl VmControl {
         self.with_domain(|d| d.destroy())?;
         std::thread::sleep(std::time::Duration::from_millis(400));
         self.with_domain(|d| d.create())
+    }
+
+    fn spice_endpoint(&self) -> Result<Option<SpiceEndpoint>, String> {
+        let conn = Connect::open(Some(&self.uri))
+            .map_err(|e| format!("libvirt connect: {e}"))?;
+        let domain = Domain::lookup_by_uuid_string(&conn, &self.uuid)
+            .map_err(|e| format!("domain lookup: {e}"))?;
+
+        let Ok((state, _)) = domain.get_state() else {
+            return Ok(None);
+        };
+        if !matches!(state, 1 | 2 | 3 | 4) {
+            return Ok(None);
+        }
+
+        let xml = domain
+            .get_xml_desc(1)
+            .map_err(|e| format!("domain xml: {e}"))?;
+        Ok(parse_spice_endpoint(&xml))
     }
 
     /// Returns `true` when the VM has an active SPICE server (running or
@@ -147,16 +189,136 @@ impl VmControl {
     }
 }
 
+fn extract_attr(tag: &str, key: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let needle = format!("{key}={quote}");
+        if let Some(start) = tag.find(&needle) {
+            let rest = &tag[start + needle.len()..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_spice_endpoint(xml: &str) -> Option<SpiceEndpoint> {
+    let mut search_from = 0usize;
+
+    while let Some(rel) = xml[search_from..].find("<graphics") {
+        let start = search_from + rel;
+        let after = &xml[start..];
+        let close = after.find('>')?;
+        let open_tag = &after[..=close];
+
+        if extract_attr(open_tag, "type").as_deref() != Some("spice") {
+            search_from = start + close + 1;
+            continue;
+        }
+
+        let port = extract_attr(open_tag, "port")
+            .filter(|p| !p.is_empty() && p != "-1")?;
+        let mut host = extract_attr(open_tag, "listen");
+        if matches!(host.as_deref(), Some("") | Some("0.0.0.0")) {
+            host = None;
+        }
+
+        let password = extract_attr(open_tag, "passwd")
+            .or_else(|| extract_attr(open_tag, "password"))
+            .unwrap_or_default();
+
+        if host.is_none() && !open_tag.trim_end().ends_with("/>") {
+            if let Some(end_rel) = after.find("</graphics>") {
+                let body = &after[close + 1..end_rel];
+                if let Some(listen_rel) = body.find("<listen") {
+                    let listen_after = &body[listen_rel..];
+                    if let Some(listen_close) = listen_after.find('>') {
+                        let listen_tag = &listen_after[..=listen_close];
+                        host = extract_attr(listen_tag, "address")
+                            .or_else(|| extract_attr(listen_tag, "host"));
+                        if matches!(host.as_deref(), Some("") | Some("0.0.0.0")) {
+                            host = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        return Some(SpiceEndpoint {
+            host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
+            port,
+            password,
+        });
+    }
+
+    None
+}
+
+#[repr(C)]
+struct ReconnectRequest {
+    viewer: *mut GrvViewer,
+    host: CString,
+    port: CString,
+    password: CString,
+}
+
+unsafe extern "C" fn idle_reconnect(data: *mut c_void) -> c_int {
+    let req = Box::from_raw(data as *mut ReconnectRequest);
+    grv_viewer_reconnect(
+        req.viewer,
+        req.host.as_ptr(),
+        req.port.as_ptr(),
+        req.password.as_ptr(),
+    );
+    0 // G_SOURCE_REMOVE
+}
+
+fn schedule_reconnect(viewer_addr: usize, endpoint: SpiceEndpoint) {
+    if viewer_addr == 0 {
+        return;
+    }
+    let Ok(host) = CString::new(endpoint.host) else { return };
+    let Ok(port) = CString::new(endpoint.port) else { return };
+    let Ok(password) = CString::new(endpoint.password) else { return };
+
+    let req = Box::new(ReconnectRequest {
+        viewer: viewer_addr as *mut GrvViewer,
+        host,
+        port,
+        password,
+    });
+
+    unsafe {
+        g_idle_add(idle_reconnect, Box::into_raw(req) as *mut c_void);
+    }
+}
+
+fn wait_for_spice_endpoint(vm: &VmControl, timeout_secs: u64) -> Option<SpiceEndpoint> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Ok(Some(endpoint)) = vm.spice_endpoint() {
+            return Some(endpoint);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 /// GTK calls this from the main thread when a toolbar button is activated.
 /// We spawn a thread so libvirt I/O never stalls the GTK event loop.
 unsafe extern "C" fn vm_action_cb(action: c_int, user_data: *mut c_void) {
-    let vm = &*(user_data as *const VmControl);
+    let ctx = &*(user_data as *const ActionContext);
     // Clone connection info for the worker thread.
-    let uri  = vm.uri.clone();
-    let uuid = vm.uuid.clone();
+    let uri = ctx.vm.uri.clone();
+    let uuid = ctx.vm.uuid.clone();
+    let viewer_addr = ctx.viewer_addr.load(Ordering::Relaxed);
     std::thread::spawn(move || {
         let vm = VmControl { uri, uuid };
+        let is_power_on = action == ACTION_POWER_ON;
         let result = match action {
+            x if x == ACTION_POWER_ON     => vm.start(),
             x if x == ACTION_PAUSE        => vm.pause(),
             x if x == ACTION_RESUME       => vm.resume(),
             x if x == ACTION_SHUTDOWN     => vm.shutdown(),
@@ -168,6 +330,19 @@ unsafe extern "C" fn vm_action_cb(action: c_int, user_data: *mut c_void) {
                 return;
             }
         };
+
+        if is_power_on {
+            if let Some(endpoint) = wait_for_spice_endpoint(&vm, 60) {
+                eprintln!(
+                    "grustyvman-viewer: reconnecting to SPICE {}:{}",
+                    endpoint.host, endpoint.port
+                );
+                schedule_reconnect(viewer_addr, endpoint);
+            } else {
+                eprintln!("grustyvman-viewer: timed out waiting for SPICE endpoint after power on");
+            }
+        }
+
         if let Err(e) = result {
             eprintln!("grustyvman-viewer: VM action failed: {e}");
         }
@@ -221,6 +396,13 @@ impl Args {
 
 fn main() {
     let args = Args::parse();
+    if let Ok(exe) = std::env::current_exe() {
+        eprintln!(
+            "grustyvman-viewer: startup reconnect-build {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            exe.display()
+        );
+    }
 
     let host_c     = CString::new(args.host.as_str()).expect("host contains NUL");
     let port_c     = CString::new(args.port.as_str()).expect("port contains NUL");
@@ -233,8 +415,14 @@ fn main() {
 
     // Heap-allocate VmControl so it lives for the duration of the process and
     // can be handed to C as a stable pointer.
-    let vm = Box::new(VmControl { uri: args.uri, uuid: args.uuid });
-    let vm_ptr = Box::into_raw(vm);
+    let action_ctx = Box::new(ActionContext {
+        vm: VmControl {
+            uri: args.uri,
+            uuid: args.uuid,
+        },
+        viewer_addr: AtomicUsize::new(0),
+    });
+    let action_ctx_ptr = Box::into_raw(action_ctx);
 
     // ── GTK / SPICE setup (unsafe) ─────────────────────────────────────────
     let viewer_handle = unsafe {
@@ -254,12 +442,16 @@ fn main() {
             title_c.as_ptr(),
             session,
             Some(vm_action_cb),
-            vm_ptr as *mut c_void,
+            action_ctx_ptr as *mut c_void,
         );
         if viewer.is_null() {
             eprintln!("grustyvman-viewer: failed to build viewer");
             std::process::exit(1);
         }
+
+        (*action_ctx_ptr)
+            .viewer_addr
+            .store(viewer as usize, Ordering::Relaxed);
 
         grv_viewer_show(viewer);
 
@@ -297,6 +489,6 @@ fn main() {
     unsafe {
         gtk_main();
         // Reclaim VmControl to avoid the leak warning.
-        drop(Box::from_raw(vm_ptr));
+        drop(Box::from_raw(action_ctx_ptr));
     }
 }

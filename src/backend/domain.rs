@@ -143,6 +143,8 @@ pub fn launch_console(uri: &str, uuid: &str) -> Result<(), AppError> {
                 .unwrap_or("127.0.0.1");
 
             let viewer = find_viewer_binary();
+            eprintln!("grustyvman: launching viewer binary {}", viewer.display());
+            log::debug!("Launching SPICE viewer: {}", viewer.display());
             let name = get_domain_name(uri, uuid)?;
             let mut cmd = std::process::Command::new(&viewer);
             cmd.arg("--host").arg(host)
@@ -170,14 +172,66 @@ pub fn launch_console(uri: &str, uuid: &str) -> Result<(), AppError> {
 }
 
 fn find_viewer_binary() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("grustyvman-viewer");
-            if candidate.exists() {
-                return candidate;
-            }
+    if let Ok(path) = std::env::var("GRUSTYVMAN_VIEWER") {
+        let candidate = std::path::PathBuf::from(path);
+        if candidate.is_file() {
+            return candidate;
         }
     }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(
+            cwd.join("viewer")
+                .join("target")
+                .join("debug")
+                .join("grustyvman-viewer"),
+        );
+        candidates.push(
+            cwd.join("viewer")
+                .join("target")
+                .join("release")
+                .join("grustyvman-viewer"),
+        );
+        candidates.push(cwd.join("viewer").join("grustyvman-viewer"));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(parent) = dir.parent() {
+                if let Some(repo_root) = parent.parent() {
+                    candidates.push(
+                        repo_root
+                            .join("viewer")
+                            .join("target")
+                            .join("debug")
+                            .join("grustyvman-viewer"),
+                    );
+                    candidates.push(
+                        repo_root
+                            .join("viewer")
+                            .join("target")
+                            .join("release")
+                            .join("grustyvman-viewer"),
+                    );
+                    candidates.push(repo_root.join("viewer").join("grustyvman-viewer"));
+                }
+
+                candidates.push(parent.join("debug").join("grustyvman-viewer"));
+                candidates.push(parent.join("release").join("grustyvman-viewer"));
+            }
+
+            candidates.push(dir.join("grustyvman-viewer"));
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
     std::path::PathBuf::from("grustyvman-viewer")
 }
 

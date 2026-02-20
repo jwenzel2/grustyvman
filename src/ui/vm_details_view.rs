@@ -320,6 +320,12 @@ impl VmDetailsView {
             }
         }
     }
+
+    pub fn update_runtime_status(&self, state_label: &str, domain_id: Option<u32>) {
+        self.status_row.set_subtitle(state_label);
+        self.id_row
+            .set_subtitle(&domain_id.map(|id| id.to_string()).unwrap_or_else(|| "-".to_string()));
+    }
 }
 
 fn clear_pref_group(group: &adw::PreferencesGroup) {

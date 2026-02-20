@@ -11,12 +11,13 @@
 
 /* ---- Action IDs (must match Rust side) --------------------------------- */
 
-#define GRV_ACTION_PAUSE         0
-#define GRV_ACTION_RESUME        1
-#define GRV_ACTION_SHUTDOWN      2
-#define GRV_ACTION_REBOOT        3
-#define GRV_ACTION_FORCE_STOP    4
-#define GRV_ACTION_FORCE_REBOOT  5
+#define GRV_ACTION_POWER_ON      0
+#define GRV_ACTION_PAUSE         1
+#define GRV_ACTION_RESUME        2
+#define GRV_ACTION_SHUTDOWN      3
+#define GRV_ACTION_REBOOT        4
+#define GRV_ACTION_FORCE_STOP    5
+#define GRV_ACTION_FORCE_REBOOT  6
 
 typedef void (*GrvActionFn)(int action, void *user_data);
 
@@ -60,6 +61,7 @@ typedef struct {
 
 /* ---- Forward declarations --------------------------------------------- */
 static void toggle_fullscreen(GrvViewer *v);
+static void show_display(GrvViewer *v);
 
 /* ---- CSS for the powered-off page ------------------------------------- */
 
@@ -134,9 +136,7 @@ show_powered_off(GrvViewer *v, const char *title_text, const char *sub_text)
     gtk_label_set_text(GTK_LABEL(v->status_sub),   sub_text);
     gtk_stack_set_visible_child_name(GTK_STACK(v->stack), "powered-off");
 
-    /* Disable toolbar actions — nothing to control on a stopped VM.
-     * (The user can close the window and start the VM from the main app.) */
-    gtk_widget_set_sensitive(v->toolbar, FALSE);
+    /* Keep controls enabled so "Power On" can restart the VM from here. */
 
     /* Append state to window title for taskbar visibility */
     const gchar *cur = gtk_window_get_title(GTK_WINDOW(v->window));
@@ -144,6 +144,25 @@ show_powered_off(GrvViewer *v, const char *title_text, const char *sub_text)
         gchar *new_title = g_strdup_printf("%s [Powered Off]", cur);
         gtk_window_set_title(GTK_WINDOW(v->window), new_title);
         g_free(new_title);
+    }
+}
+
+static void
+show_display(GrvViewer *v)
+{
+    gtk_stack_set_visible_child_name(GTK_STACK(v->stack), "display");
+
+    /* Remove the powered-off suffix if present. */
+    const gchar *cur = gtk_window_get_title(GTK_WINDOW(v->window));
+    if (cur) {
+        const char *suffix = " [Powered Off]";
+        gsize cur_len = strlen(cur);
+        gsize suffix_len = strlen(suffix);
+        if (cur_len > suffix_len && g_str_has_suffix(cur, suffix)) {
+            gchar *trimmed = g_strndup(cur, cur_len - suffix_len);
+            gtk_window_set_title(GTK_WINDOW(v->window), trimmed);
+            g_free(trimmed);
+        }
     }
 }
 
@@ -159,7 +178,9 @@ on_channel_event(SpiceChannel *channel, SpiceChannelEvent event, gpointer data)
 
     GrvViewer *v = (GrvViewer *)data;
 
-    if (event == SPICE_CHANNEL_CLOSED) {
+    if (event == SPICE_CHANNEL_OPENED) {
+        show_display(v);
+    } else if (event == SPICE_CHANNEL_CLOSED) {
         show_powered_off(v,
             "VM Powered Off",
             "The virtual machine has stopped.");
@@ -226,8 +247,14 @@ on_action(GtkWidget *widget, gpointer data)
 {
     int action = GPOINTER_TO_INT(data);
     GrvViewer *v = g_object_get_data(G_OBJECT(widget), "grv-viewer");
-    if (v && v->action_fn)
+    if (v && v->action_fn) {
         v->action_fn(action, v->action_data);
+        if (action == GRV_ACTION_POWER_ON) {
+            gtk_label_set_text(GTK_LABEL(v->status_title), "Starting VM");
+            gtk_label_set_text(GTK_LABEL(v->status_sub), "Waiting for console to reconnect...");
+            gtk_stack_set_visible_child_name(GTK_STACK(v->stack), "powered-off");
+        }
+    }
 }
 
 static GtkWidget *
@@ -320,6 +347,8 @@ build_toolbar(GrvViewer *v)
 
     /* ── VM control buttons ────────────────────────────────────────────── */
     gtk_box_pack_start(GTK_BOX(bar),
+        make_action_btn(v, "Power On", GRV_ACTION_POWER_ON), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bar),
         make_action_btn(v, "Pause",    GRV_ACTION_PAUSE),    FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar),
         make_action_btn(v, "Resume",   GRV_ACTION_RESUME),   FALSE, FALSE, 0);
@@ -370,7 +399,7 @@ build_toolbar(GrvViewer *v)
         GtkWidget *menu = gtk_menu_new();
 
         GtkWidget *scale_it = gtk_check_menu_item_new_with_label("Scale Display");
-        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(scale_it), TRUE);
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(scale_it), FALSE);
         g_object_set_data(G_OBJECT(scale_it), "grv-viewer", v);
         g_signal_connect(scale_it, "toggled", G_CALLBACK(on_scale_toggled), NULL);
         gtk_menu_shell_append(GTK_MENU_SHELL(menu), scale_it);
@@ -418,6 +447,60 @@ grv_session_connect(SpiceSession *session)
     spice_session_connect(session);
 }
 
+void
+grv_viewer_reconnect(GrvViewer *v,
+                     const char *host,
+                     const char *port,
+                     const char *password)
+{
+    if (!v || !v->session || !host || !port)
+        return;
+
+    gboolean scaling = FALSE;
+    gboolean resize_guest = TRUE;
+    SpiceSession *old_session = v->session;
+    if (v->display) {
+        g_object_get(G_OBJECT(v->display),
+                     "scaling", &scaling,
+                     "resize-guest", &resize_guest,
+                     NULL);
+        gtk_container_remove(GTK_CONTAINER(v->stack), GTK_WIDGET(v->display));
+        gtk_widget_destroy(GTK_WIDGET(v->display));
+        v->display = NULL;
+    }
+
+    /* Build a fresh SPICE session/display pair to avoid stale channel state
+     * after a full VM power cycle. */
+    spice_session_disconnect(old_session);
+
+    SpiceSession *session = spice_session_new();
+    g_object_set(G_OBJECT(session),
+                 "host", host,
+                 "port", port,
+                 NULL);
+    if (password && *password) {
+        g_object_set(G_OBJECT(session), "password", password, NULL);
+    }
+
+    g_signal_connect(session, "channel-new",
+                     G_CALLBACK(on_channel_new), v);
+
+    SpiceDisplay *display = spice_display_new(session, 0);
+    g_object_set(G_OBJECT(display),
+                 "scaling", scaling,
+                 "resize-guest", resize_guest,
+                 NULL);
+    gtk_stack_add_named(GTK_STACK(v->stack), GTK_WIDGET(display), "display");
+    v->session = session;
+    v->display = display;
+
+    g_printerr("grustyvman-viewer: reconnect session to %s:%s\n", host, port);
+    spice_audio_get(session, NULL);
+    spice_session_connect(session);
+
+    g_object_unref(old_session);
+}
+
 GrvViewer *
 grv_viewer_build(const char *title,
                  SpiceSession *session,
@@ -432,7 +515,7 @@ grv_viewer_build(const char *title,
     /* Display */
     SpiceDisplay *display = spice_display_new(session, 0);
     g_object_set(G_OBJECT(display),
-                 "scaling",      TRUE,
+                 "scaling",      FALSE,
                  "resize-guest", TRUE,
                  NULL);
     v->display = display;
