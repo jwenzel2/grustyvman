@@ -674,7 +674,7 @@ impl Window {
 
         // Auto-refresh timer
         let win = self.downgrade();
-        glib::timeout_add_seconds_local(5, move || {
+        glib::timeout_add_seconds_local(2, move || {
             if let Some(win) = win.upgrade() {
                 win.refresh_vm_list();
                 let sidebar = win.imp().active_sidebar.borrow().clone();

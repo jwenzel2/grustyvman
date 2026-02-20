@@ -120,14 +120,65 @@ pub fn list_networks(uri: &str) -> Result<Vec<String>, AppError> {
 }
 
 pub fn launch_console(uri: &str, uuid: &str) -> Result<(), AppError> {
-    let name = get_domain_name(uri, uuid)?;
-    std::process::Command::new("virt-viewer")
-        .arg("--connect")
-        .arg(uri)
-        .arg("--wait")
-        .arg(&name)
-        .spawn()?;
+    // Fetch the running domain XML (with VIR_DOMAIN_XML_SECURE=1 to get passwd)
+    let xml = with_domain(uri, uuid, |domain| Ok(domain.get_xml_desc(1)?))?;
+    let details = crate::backend::domain_xml::parse_domain_xml(&xml)?;
+
+    match details.graphics {
+        Some(ref g) if g.graphics_type == crate::backend::types::GraphicsType::Spice => {
+            let port: i32 = match g.port {
+                Some(p) if p > 0 => p,
+                _ => {
+                    return Err(AppError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "SPICE port not yet allocated — is the VM running?",
+                    )))
+                }
+            };
+            // Resolve the host: treat 0.0.0.0 and empty as localhost
+            let host = g
+                .listen_address
+                .as_deref()
+                .map(|a: &str| if a == "0.0.0.0" || a.is_empty() { "127.0.0.1" } else { a })
+                .unwrap_or("127.0.0.1");
+
+            let viewer = find_viewer_binary();
+            let name = get_domain_name(uri, uuid)?;
+            let mut cmd = std::process::Command::new(&viewer);
+            cmd.arg("--host").arg(host)
+                .arg("--port").arg(port.to_string())
+                .arg("--uri").arg(uri)
+                .arg("--uuid").arg(uuid)
+                .arg("--title").arg(format!("{name} — SPICE Console"));
+            if let Some(ref pw) = g.password {
+                cmd.arg("--password").arg(pw);
+            }
+            cmd.spawn()?;
+        }
+        _ => {
+            // VNC or no graphics: fall back to virt-viewer
+            let name = get_domain_name(uri, uuid)?;
+            std::process::Command::new("virt-viewer")
+                .arg("--connect")
+                .arg(uri)
+                .arg("--wait")
+                .arg(&name)
+                .spawn()?;
+        }
+    }
     Ok(())
+}
+
+fn find_viewer_binary() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("grustyvman-viewer");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    std::path::PathBuf::from("grustyvman-viewer")
 }
 
 /// Rename a shutoff domain by redefining it with a new name.

@@ -1,0 +1,14 @@
+[package]
+name = "grustyvman-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# libvirt bindings — used for Pause/Resume/Shutdown/Reboot VM controls.
+# GTK3 and spice-gtk are accessed via raw FFI in spice_helpers.c; no gtk-rs
+# crate is needed.
+virt = "0.4"
+
+[build-dependencies]
+pkg-config = "0.3"
+cc = "1.0"

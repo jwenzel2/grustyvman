@@ -489,6 +489,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                         let mut port = None;
                         let mut autoport = false;
                         let mut listen_address = None;
+                        let mut password = None;
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"type" => {
@@ -508,6 +509,12 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                                     listen_address =
                                         Some(String::from_utf8_lossy(&attr.value).to_string());
                                 }
+                                b"passwd" => {
+                                    let pw = String::from_utf8_lossy(&attr.value).to_string();
+                                    if !pw.is_empty() {
+                                        password = Some(pw);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -516,6 +523,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                             port,
                             autoport,
                             listen_address,
+                            password,
                         });
                     }
                     "video" if in_devices => {

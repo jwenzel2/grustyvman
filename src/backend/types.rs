@@ -433,6 +433,7 @@ pub struct GraphicsInfo {
     pub port: Option<i32>,
     pub autoport: bool,
     pub listen_address: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
