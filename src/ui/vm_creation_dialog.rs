@@ -6,15 +6,17 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::domain_xml::NewVmParams;
-use crate::backend::types::FirmwareType;
+use crate::backend::types::{DiskFormat, FirmwareType, VolumeInfo};
 
 pub fn show_creation_dialog(
     parent: &adw::ApplicationWindow,
+    pool_volumes: Vec<(String, Vec<VolumeInfo>)>,
     on_create: impl Fn(NewVmParams) + 'static,
 ) {
     let dialog = gtk::Window::new();
     dialog.set_title(Some("New Virtual Machine"));
     dialog.set_default_size(480, 520);
+    dialog.set_decorated(false); // suppress WM title bar; adw::HeaderBar provides the only bar
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
 
@@ -70,6 +72,14 @@ pub fn show_creation_dialog(
     disk_row.set_value(20.0);
     resources_group.add(&disk_row);
 
+    let format_labels: Vec<&str> = DiskFormat::ALL.iter().map(|f| f.label()).collect();
+    let format_list = gtk::StringList::new(&format_labels);
+    let format_row = adw::ComboRow::new();
+    format_row.set_title("Disk Format");
+    format_row.set_model(Some(&format_list));
+    format_row.set_selected(0); // qcow2 by default
+    resources_group.add(&format_row);
+
     content.append(&resources_group);
 
     // ISO group
@@ -84,6 +94,10 @@ pub fn show_creation_dialog(
 
     let browse_btn = gtk::Button::with_label("Browse...");
     browse_btn.set_valign(gtk::Align::Center);
+    if pool_volumes.is_empty() {
+        browse_btn.set_sensitive(false);
+        browse_btn.set_tooltip_text(Some("No storage pools available"));
+    }
     iso_row.add_suffix(&browse_btn);
 
     let clear_btn = gtk::Button::from_icon_name("edit-clear-symbolic");
@@ -95,40 +109,27 @@ pub fn show_creation_dialog(
     iso_group.add(&iso_row);
     content.append(&iso_group);
 
-    // Browse button handler
+    // Browse button handler — opens the libvirt storage volume picker
     let iso_path_clone = iso_path.clone();
     let iso_row_clone = iso_row.clone();
     let clear_btn_clone = clear_btn.clone();
-    let dialog_ref = dialog.clone();
+    let parent_clone = parent.clone();
+    let pool_volumes_clone = pool_volumes.clone();
     browse_btn.connect_clicked(move |_| {
-        let file_dialog = gtk::FileDialog::new();
-        file_dialog.set_title("Select ISO Image");
-
-        let filter = gtk::FileFilter::new();
-        filter.add_pattern("*.iso");
-        filter.add_pattern("*.ISO");
-        filter.set_name(Some("ISO Images"));
-
-        let filters = gio::ListStore::new::<gtk::FileFilter>();
-        filters.append(&filter);
-        file_dialog.set_filters(Some(&filters));
-
         let iso_path = iso_path_clone.clone();
         let iso_row = iso_row_clone.clone();
         let clear_btn = clear_btn_clone.clone();
-
-        file_dialog.open(
-            Some(&dialog_ref),
-            gio::Cancellable::NONE,
-            move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let path_str = path.to_string_lossy().to_string();
-                        iso_row.set_subtitle(&path_str);
-                        *iso_path.borrow_mut() = Some(path_str);
-                        clear_btn.set_visible(true);
-                    }
-                }
+        crate::ui::storage_volume_picker_dialog::show_storage_volume_picker(
+            &parent_clone,
+            &pool_volumes_clone,
+            move |path| {
+                let display = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                iso_row.set_subtitle(&display);
+                *iso_path.borrow_mut() = Some(path);
+                clear_btn.set_visible(true);
             },
         );
     });
@@ -158,12 +159,15 @@ pub fn show_creation_dialog(
     create_btn.connect_clicked(move |_| {
         let fw_idx = firmware_row.selected() as usize;
         let firmware = FirmwareType::ALL.get(fw_idx).copied().unwrap_or(FirmwareType::Bios);
+        let fmt_idx = format_row.selected() as usize;
+        let disk_format = DiskFormat::ALL.get(fmt_idx).copied().unwrap_or(DiskFormat::Qcow2);
 
         let params = NewVmParams {
             name: name_row.text().to_string(),
             vcpus: cpu_row.value() as u32,
             memory_mib: memory_row.value() as u64,
             disk_size_gib: disk_row.value() as u64,
+            disk_format,
             iso_path: iso_path.borrow().clone(),
             firmware,
         };

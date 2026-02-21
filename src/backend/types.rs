@@ -639,6 +639,37 @@ pub struct CpuTune {
 // --- VM Types ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskFormat {
+    Qcow2,
+    Raw,
+}
+
+impl DiskFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "raw",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "img",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "raw",
+        }
+    }
+
+    pub const ALL: &[DiskFormat] = &[DiskFormat::Qcow2, DiskFormat::Raw];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirmwareType {
     Bios,
     Efi,

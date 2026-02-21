@@ -55,11 +55,52 @@ pub fn reboot_vm(uri: &str, uuid: &str) -> Result<(), AppError> {
 
 pub fn delete_vm(uri: &str, uuid: &str) -> Result<(), AppError> {
     with_domain(uri, uuid, |domain| {
-        // Try to destroy if running
+        // Try to destroy if running; ignore error if already stopped.
         let _ = domain.destroy();
-        domain.undefine()?;
+        // Use undefine_flags to handle EFI VMs (NVRAM), snapshot metadata,
+        // managed save state, and checkpoint metadata cleanly.
+        let flags = virt::sys::VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
+            | virt::sys::VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
+            | virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM
+            | virt::sys::VIR_DOMAIN_UNDEFINE_CHECKPOINTS_METADATA;
+        domain.undefine_flags(flags)?;
         Ok(())
     })
+}
+
+/// Return the source file paths of all non-cdrom disks attached to the VM.
+pub fn get_vm_disk_paths(uri: &str, uuid: &str) -> Result<Vec<String>, AppError> {
+    let xml = get_domain_xml(uri, uuid)?;
+    let details = crate::backend::domain_xml::parse_domain_xml(&xml)?;
+    let paths = details
+        .disks
+        .into_iter()
+        .filter(|d| d.device_type != "cdrom")
+        .filter_map(|d| d.source_file)
+        .collect();
+    Ok(paths)
+}
+
+/// Undefine a VM and optionally delete the given storage volumes by path.
+pub fn delete_vm_with_storage(
+    uri: &str,
+    uuid: &str,
+    vol_paths: Vec<String>,
+) -> Result<(), AppError> {
+    delete_vm(uri, uuid)?;
+    let mut errors: Vec<String> = Vec::new();
+    for path in &vol_paths {
+        if let Err(e) = crate::backend::storage::delete_volume_by_path(uri, path) {
+            errors.push(format!("{path}: {e}"));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(AppError::Libvirt(format!(
+            "VM deleted but some volumes could not be removed: {}",
+            errors.join("; ")
+        )));
+    }
+    Ok(())
 }
 
 pub fn get_domain_xml(uri: &str, uuid: &str) -> Result<String, AppError> {

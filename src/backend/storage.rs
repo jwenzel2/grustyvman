@@ -248,6 +248,55 @@ pub fn delete_volume(uri: &str, pool_uuid: &str, vol_name: &str) -> Result<(), A
     })
 }
 
+/// Create a disk volume for a new VM in the default storage pool (falling back
+/// to the first active pool). Returns the absolute path to the new volume.
+/// Uses libvirt so the daemon handles permissions — no direct filesystem access needed.
+pub fn create_vm_disk(
+    uri: &str,
+    name: &str,
+    capacity_gib: u64,
+    format: &str,
+    extension: &str,
+) -> Result<String, AppError> {
+    let conn = Connect::open(Some(uri))?;
+    let pools = conn.list_all_storage_pools(0)?;
+
+    // Prefer "default"; fall back to the first active pool.
+    let pool = pools
+        .iter()
+        .find(|p| {
+            p.is_active().unwrap_or(false)
+                && p.get_name().map(|n| n == "default").unwrap_or(false)
+        })
+        .or_else(|| pools.iter().find(|p| p.is_active().unwrap_or(false)))
+        .ok_or_else(|| AppError::Libvirt("No active storage pool found".to_string()))?;
+
+    let vol_name = format!("{name}.{extension}");
+    let capacity_bytes = capacity_gib * 1024 * 1024 * 1024;
+    let xml = format!(
+        r#"<volume>
+  <name>{vol_name}</name>
+  <capacity unit="bytes">{capacity_bytes}</capacity>
+  <target>
+    <format type="{format}"/>
+  </target>
+</volume>"#
+    );
+
+    let vol = StorageVol::create_xml(pool, &xml, 0)?;
+    let path = vol.get_path()?;
+    Ok(path)
+}
+
+/// Delete a storage volume by its absolute path. Ignores errors from volumes
+/// that are not tracked by any pool (e.g. manually placed files).
+pub fn delete_volume_by_path(uri: &str, path: &str) -> Result<(), AppError> {
+    let conn = Connect::open(Some(uri))?;
+    let vol = StorageVol::lookup_by_path(&conn, path)?;
+    vol.delete(0)?;
+    Ok(())
+}
+
 pub fn extract_pool_type_and_path(xml: &str) -> (String, String) {
     use quick_xml::events::Event;
     use quick_xml::Reader;

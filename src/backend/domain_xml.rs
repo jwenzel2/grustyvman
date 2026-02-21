@@ -1,6 +1,6 @@
 use crate::backend::types::{
-    BootDevice, ChangeNetworkSourceParams, ChannelInfo, ControllerInfo, CpuMode, CpuTune, DiskInfo,
-    DomainDetails, FilesystemInfo, FirmwareType, GraphicsInfo, GraphicsType, HostdevInfo,
+    BootDevice, ChangeNetworkSourceParams, ChannelInfo, ControllerInfo, CpuMode, CpuTune, DiskFormat,
+    DiskInfo, DomainDetails, FilesystemInfo, FirmwareType, GraphicsInfo, GraphicsType, HostdevInfo,
     InputInfo, MemballoonModel, NetworkInfo, NetworkSourceType, NewDiskParams, NewNetworkParams,
     PanicModel, ParallelInfo, RngBackend, SerialInfo, SmartcardMode, SoundInfo, SoundModel,
     TpmInfo, TpmModel, UsbredirInfo, VcpuPin, VideoInfo, VideoModel, WatchdogAction, WatchdogInfo,
@@ -16,6 +16,7 @@ pub struct NewVmParams {
     pub vcpus: u32,
     pub memory_mib: u64,
     pub disk_size_gib: u64,
+    pub disk_format: DiskFormat,
     pub iso_path: Option<String>,
     pub firmware: FirmwareType,
 }
@@ -93,7 +94,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type="file" device="disk">
-      <driver name="qemu" type="qcow2"/>
+      <driver name="qemu" type="{disk_format}"/>
       <source file="{disk_path}"/>
       <target dev="vda" bus="virtio"/>
     </disk>
@@ -117,6 +118,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
         vcpus = params.vcpus,
         os_tag = os_tag,
         smm_feature = smm_feature,
+        disk_format = params.disk_format.as_str(),
         disk_path = disk_path,
         cdrom_boot = if params.iso_path.is_some() {
             "    <boot dev=\"cdrom\"/>\n"
@@ -136,31 +138,15 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
 }
 
 pub fn create_vm(uri: &str, params: &NewVmParams) -> Result<(), AppError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let images_dir = format!("{home}/.local/share/libvirt/images");
-    std::fs::create_dir_all(&images_dir)?;
-
-    let disk_path = format!("{images_dir}/{}.qcow2", params.name);
-
-    let output = std::process::Command::new("qemu-img")
-        .args([
-            "create",
-            "-f",
-            "qcow2",
-            &disk_path,
-            &format!("{}G", params.disk_size_gib),
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "qemu-img failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        )));
-    }
+    // Create the disk volume via libvirt so it lands in the default storage pool
+    // and is properly registered — no direct filesystem access needed.
+    let disk_path = crate::backend::storage::create_vm_disk(
+        uri,
+        &params.name,
+        params.disk_size_gib,
+        params.disk_format.as_str(),
+        params.disk_format.extension(),
+    )?;
 
     let xml = generate_domain_xml(params, &disk_path);
 

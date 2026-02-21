@@ -328,17 +328,23 @@ impl VmDetailsView {
     }
 }
 
-fn clear_pref_group(group: &adw::PreferencesGroup) {
-    let mut rows_to_remove = Vec::new();
-    let mut child = group.first_child();
+fn collect_action_rows(widget: &gtk::Widget, out: &mut Vec<adw::ActionRow>) {
+    if let Some(row) = widget.downcast_ref::<adw::ActionRow>() {
+        out.push(row.clone());
+        return;
+    }
+    let mut child = widget.first_child();
     while let Some(c) = child {
         let next = c.next_sibling();
-        if c.downcast_ref::<adw::ActionRow>().is_some() {
-            rows_to_remove.push(c);
-        }
+        collect_action_rows(&c, out);
         child = next;
     }
-    for row in rows_to_remove {
+}
+
+fn clear_pref_group(group: &adw::PreferencesGroup) {
+    let mut rows = Vec::new();
+    collect_action_rows(group.upcast_ref::<gtk::Widget>(), &mut rows);
+    for row in rows {
         group.remove(&row);
     }
 }

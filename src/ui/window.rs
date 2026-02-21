@@ -793,12 +793,7 @@ impl Window {
         let win = self.downgrade();
         imp.btn_delete.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
-                win.confirm_and_act(
-                    "Delete VM?",
-                    "This will permanently remove the VM definition. Disk images will not be deleted.",
-                    "Delete",
-                    "delete",
-                );
+                win.show_delete_vm_dialog();
             }
         });
 
@@ -951,7 +946,7 @@ impl Window {
                 "pause" => backend::domain::pause_vm(&uri, &uuid),
                 "resume" => backend::domain::resume_vm(&uri, &uuid),
                 "reboot" => backend::domain::reboot_vm(&uri, &uuid),
-                "delete" => backend::domain::delete_vm(&uri, &uuid),
+                "delete" => backend::domain::delete_vm_with_storage(&uri, &uuid, vec![]),
                 "console" => backend::domain::launch_console(&uri, &uuid),
                 _ => Ok(()),
             }
@@ -1843,28 +1838,151 @@ impl Window {
     // --- VM dialogs ---
 
     fn show_create_vm_dialog(&self) {
+        let uri = self.imp().connection_uri.borrow().clone();
         let win = self.downgrade();
-        crate::ui::vm_creation_dialog::show_creation_dialog(self.upcast_ref(), move |params| {
-            let Some(win) = win.upgrade() else { return };
-            let uri = win.imp().connection_uri.borrow().clone();
 
-            let rx = spawn_blocking(move || backend::domain_xml::create_vm(&uri, &params));
+        // Fetch storage pool volumes via libvirt so the creation dialog can
+        // offer them for ISO selection without needing direct filesystem access.
+        let rx = spawn_blocking({
+            let uri = uri.clone();
+            move || backend::storage::list_all_pool_volumes(&uri)
+        });
+
+        glib::spawn_future_local(async move {
+            let Ok(pool_volumes) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+            let pool_volumes = pool_volumes.unwrap_or_default();
+
+            let win_weak = win.downgrade();
+            crate::ui::vm_creation_dialog::show_creation_dialog(
+                win.upcast_ref(),
+                pool_volumes,
+                move |params| {
+                    let Some(win) = win_weak.upgrade() else { return };
+                    let uri = win.imp().connection_uri.borrow().clone();
+
+                    let rx = spawn_blocking(move || backend::domain_xml::create_vm(&uri, &params));
+
+                    let win2 = win.downgrade();
+                    glib::spawn_future_local(async move {
+                        let Ok(result) = rx.recv().await else { return };
+                        let Some(win) = win2.upgrade() else { return };
+
+                        match result {
+                            Ok(()) => {
+                                win.show_toast("VM created successfully");
+                                win.refresh_vm_list();
+                            }
+                            Err(e) => {
+                                win.show_toast(&format!("Failed to create VM: {e}"));
+                            }
+                        }
+                    });
+                },
+            );
+        });
+    }
+
+    fn show_delete_vm_dialog(&self) {
+        let uuid = match self.imp().selected_uuid.borrow().clone() {
+            Some(u) => u,
+            None => return,
+        };
+        let uri = self.imp().connection_uri.borrow().clone();
+        let win = self.downgrade();
+
+        // Fetch the disk paths in the background so we can list them in the dialog.
+        let rx = spawn_blocking({
+            let uri = uri.clone();
+            let uuid = uuid.clone();
+            move || backend::domain::get_vm_disk_paths(&uri, &uuid)
+        });
+
+        glib::spawn_future_local(async move {
+            let Ok(disk_paths) = rx.recv().await else { return };
+            let Some(win) = win.upgrade() else { return };
+            let disk_paths = disk_paths.unwrap_or_default();
+
+            // Build the dialog.
+            let dialog = adw::MessageDialog::new(
+                Some(&win),
+                Some("Delete VM?"),
+                Some("This will permanently remove the VM definition."),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("delete", "Delete");
+            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+
+            // Extra child: checkbox + disk list.
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            vbox.set_margin_top(6);
+
+            let delete_storage_check = gtk::CheckButton::with_label("Also delete storage volumes:");
+            delete_storage_check.set_active(!disk_paths.is_empty());
+            delete_storage_check.set_sensitive(!disk_paths.is_empty());
+            vbox.append(&delete_storage_check);
+
+            // Show each disk path as an indented label.
+            for path in &disk_paths {
+                let lbl = gtk::Label::new(Some(path));
+                lbl.set_halign(gtk::Align::Start);
+                lbl.set_margin_start(20);
+                lbl.add_css_class("caption");
+                lbl.add_css_class("dim-label");
+                lbl.set_wrap(true);
+                lbl.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                lbl.set_xalign(0.0);
+                vbox.append(&lbl);
+            }
+
+            dialog.set_extra_child(Some(&vbox));
 
             let win2 = win.downgrade();
-            glib::spawn_future_local(async move {
-                let Ok(result) = rx.recv().await else { return };
-                let Some(win) = win2.upgrade() else { return };
-
-                match result {
-                    Ok(()) => {
-                        win.show_toast("VM created successfully");
-                        win.refresh_vm_list();
-                    }
-                    Err(e) => {
-                        win.show_toast(&format!("Failed to create VM: {e}"));
-                    }
+            let delete_storage_check2 = delete_storage_check.clone();
+            let disk_paths2 = disk_paths.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response != "delete" {
+                    return;
                 }
+                let Some(win) = win2.upgrade() else { return };
+                let uri = win.imp().connection_uri.borrow().clone();
+                let vol_paths = if delete_storage_check2.is_active() {
+                    disk_paths2.clone()
+                } else {
+                    vec![]
+                };
+                let uuid2 = uuid.clone();
+
+                let rx = spawn_blocking(move || {
+                    backend::domain::delete_vm_with_storage(&uri, &uuid2, vol_paths)
+                });
+
+                let win3 = win.downgrade();
+                glib::spawn_future_local(async move {
+                    let Ok(result) = rx.recv().await else { return };
+                    let Some(win) = win3.upgrade() else { return };
+
+                    match result {
+                        Ok(()) => {
+                            *win.imp().selected_uuid.borrow_mut() = None;
+                            win.imp().outer_stack.set_visible_child_name("empty");
+                            win.imp().view_switcher_title.set_title("");
+                            win.imp().view_switcher_title.set_subtitle("");
+                            win.update_button_sensitivity(None);
+                            win.stop_perf_sampling();
+                            win.show_toast("VM deleted");
+                            win.refresh_vm_list();
+                        }
+                        Err(e) => {
+                            win.show_toast(&format!("Delete failed: {e}"));
+                        }
+                    }
+                });
             });
+
+            dialog.present();
         });
     }
 
