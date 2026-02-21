@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::domain_xml::NewVmParams;
-use crate::backend::types::{DiskFormat, FirmwareType, NetworkModel, NetworkSourceType, NewVmNetworkConfig, VolumeInfo};
+use crate::backend::types::{DiskFormat, FirmwareType, NetworkModel, NetworkSourceType, NewVmNetworkConfig, TpmModel, VolumeInfo};
 
 pub fn show_creation_dialog(
     parent: &adw::ApplicationWindow,
@@ -221,6 +221,34 @@ pub fn show_creation_dialog(
         btn.set_visible(false);
     });
 
+    // TPM group
+    let tpm_group = adw::PreferencesGroup::new();
+    tpm_group.set_title("Security");
+
+    let tpm_enable_row = adw::SwitchRow::new();
+    tpm_enable_row.set_title("Enable TPM");
+    tpm_enable_row.set_active(false);
+    tpm_group.add(&tpm_enable_row);
+
+    // Only show real models (not None)
+    let tpm_models: Vec<TpmModel> = TpmModel::ALL.iter().copied().filter(|m| *m != TpmModel::None).collect();
+    let tpm_model_labels: Vec<&str> = tpm_models.iter().map(|m| m.label()).collect();
+    let tpm_model_list = gtk::StringList::new(&tpm_model_labels);
+    let tpm_model_row = adw::ComboRow::new();
+    tpm_model_row.set_title("TPM Model");
+    tpm_model_row.set_model(Some(&tpm_model_list));
+    tpm_model_row.set_selected(0); // CRB
+    tpm_model_row.set_sensitive(false);
+    tpm_group.add(&tpm_model_row);
+
+    content.append(&tpm_group);
+
+    // Wire enable switch to model row sensitivity
+    let tpm_model_row_clone = tpm_model_row.clone();
+    tpm_enable_row.connect_notify_local(Some("active"), move |row, _| {
+        tpm_model_row_clone.set_sensitive(row.is_active());
+    });
+
     // Create button
     let create_btn = gtk::Button::with_label("Create");
     create_btn.add_css_class("suggested-action");
@@ -252,6 +280,13 @@ pub fn show_creation_dialog(
         let model_idx = model_row.selected() as usize;
         let model = NetworkModel::ALL.get(model_idx).copied().unwrap_or(NetworkModel::Virtio);
 
+        let tpm_model = if tpm_enable_row.is_active() {
+            let idx = tpm_model_row.selected() as usize;
+            tpm_models.get(idx).copied()
+        } else {
+            None
+        };
+
         let params = NewVmParams {
             name: name_row.text().to_string(),
             vcpus: cpu_row.value() as u32,
@@ -261,6 +296,7 @@ pub fn show_creation_dialog(
             iso_path: iso_path.borrow().clone(),
             firmware,
             network: NewVmNetworkConfig { source_type, source_value, model },
+            tpm_model,
         };
 
         if params.name.is_empty() {

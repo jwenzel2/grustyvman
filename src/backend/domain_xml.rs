@@ -20,6 +20,7 @@ pub struct NewVmParams {
     pub iso_path: Option<String>,
     pub firmware: FirmwareType,
     pub network: NewVmNetworkConfig,
+    pub tpm_model: Option<TpmModel>, // None = no TPM
 }
 
 pub fn extract_interface_targets(xml: &str) -> Vec<String> {
@@ -102,6 +103,14 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
         model = net.model.as_str(),
     );
 
+    let tpm_xml = match params.tpm_model {
+        Some(model) => format!(
+            "\n    <tpm model=\"{}\"><backend type=\"emulated\" version=\"2.0\"/></tpm>",
+            model.as_str()
+        ),
+        None => String::new(),
+    };
+
     let xml = format!(
         r#"<domain type="kvm">
   <name>{name}</name>
@@ -123,7 +132,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
       <source file="{disk_path}"/>
       <target dev="vda" bus="virtio"/>
     </disk>
-{cdrom_device}{iface_xml}
+{cdrom_device}{iface_xml}{tpm_xml}
     <graphics type="spice" autoport="yes"/>
     <video>
       <model type="virtio"/>
@@ -143,6 +152,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
         disk_format = params.disk_format.as_str(),
         disk_path = disk_path,
         iface_xml = iface_xml,
+        tpm_xml = tpm_xml,
         cdrom_boot = if params.iso_path.is_some() {
             "    <boot dev=\"cdrom\"/>\n"
         } else {
