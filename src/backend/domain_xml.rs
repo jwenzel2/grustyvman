@@ -140,6 +140,9 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
     <channel type="unix">
       <target type="virtio" name="org.qemu.guest_agent.0"/>
     </channel>
+    <channel type="spicevmc">
+      <target type="virtio" name="com.redhat.spice.0"/>
+    </channel>
     <input type="tablet" bus="usb"/>
     <console type="pty"/>
   </devices>

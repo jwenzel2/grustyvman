@@ -47,16 +47,17 @@ static const GrvKeyCombo KEY_COMBOS[] = {
 /* ---- Viewer struct ----------------------------------------------------- */
 
 typedef struct {
-    GtkWidget    *window;
-    SpiceDisplay *display;
-    SpiceSession *session;
-    GtkWidget    *toolbar;
-    GtkWidget    *stack;        /* GtkStack: "display" | "powered-off" */
-    GtkWidget    *status_title; /* GtkLabel on powered-off page */
-    GtkWidget    *status_sub;   /* GtkLabel on powered-off page */
-    gboolean      fullscreen;
-    GrvActionFn   action_fn;
-    void         *action_data;
+    GtkWidget        *window;
+    SpiceDisplay     *display;
+    SpiceSession     *session;
+    SpiceMainChannel *main_channel; /* current main channel, NULL until connected */
+    GtkWidget        *toolbar;
+    GtkWidget        *stack;        /* GtkStack: "display" | "powered-off" */
+    GtkWidget        *status_title; /* GtkLabel on powered-off page */
+    GtkWidget        *status_sub;   /* GtkLabel on powered-off page */
+    gboolean          fullscreen;
+    GrvActionFn       action_fn;
+    void             *action_data;
 } GrvViewer;
 
 /* ---- Forward declarations --------------------------------------------- */
@@ -191,12 +192,48 @@ on_channel_event(SpiceChannel *channel, SpiceChannelEvent event, gpointer data)
     }
 }
 
+/* Context passed through g_idle_add so the resize push can be deferred to
+ * the next event-loop iteration (by which time GTK will have finished all
+ * pending size-allocate passes). */
+typedef struct {
+    GrvViewer        *viewer;
+    SpiceMainChannel *channel;
+} AgentResizeCtx;
+
+static gboolean
+idle_push_display_size(gpointer user_data)
+{
+    AgentResizeCtx *ctx = (AgentResizeCtx *)user_data;
+    GrvViewer        *v = ctx->viewer;
+    SpiceMainChannel *ch = ctx->channel;
+    g_slice_free(AgentResizeCtx, ctx);
+
+    if (!v->display)
+        return G_SOURCE_REMOVE;
+
+    gboolean agent_connected = FALSE;
+    g_object_get(G_OBJECT(ch), "agent-connected", &agent_connected, NULL);
+    if (!agent_connected)
+        return G_SOURCE_REMOVE;
+
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(GTK_WIDGET(v->display), &alloc);
+    if (alloc.width <= 1 || alloc.height <= 1)
+        return G_SOURCE_REMOVE;
+
+    spice_main_channel_update_display_enabled(ch, 0, TRUE, FALSE);
+    spice_main_channel_update_display(ch, 0, 0, 0,
+                                      alloc.width, alloc.height, TRUE);
+    return G_SOURCE_REMOVE;
+}
+
 /* Called whenever the spice-vdagent connection state changes.
  *
  * When the agent first becomes available we push the current display
  * dimensions so the guest resizes immediately — without this the guest
  * keeps its original resolution until the user manually resizes the window.
- * This is the same mechanism virt-manager uses. */
+ * We defer via g_idle_add so that any in-flight GTK size-allocate passes
+ * complete before we sample the widget dimensions. */
 static void
 on_main_agent_update(SpiceMainChannel *channel, gpointer data)
 {
@@ -209,14 +246,10 @@ on_main_agent_update(SpiceMainChannel *channel, gpointer data)
     if (!agent_connected)
         return;
 
-    GtkAllocation alloc;
-    gtk_widget_get_allocation(GTK_WIDGET(v->display), &alloc);
-    if (alloc.width <= 1 || alloc.height <= 1)
-        return;
-
-    spice_main_channel_update_display_enabled(channel, 0, TRUE, FALSE);
-    spice_main_channel_update_display(channel, 0, 0, 0,
-                                      alloc.width, alloc.height, TRUE);
+    AgentResizeCtx *ctx = g_slice_new(AgentResizeCtx);
+    ctx->viewer  = v;
+    ctx->channel = channel;
+    g_idle_add(idle_push_display_size, ctx);
 }
 
 /* SpiceSession emits "channel-new" for every channel it creates.
@@ -228,6 +261,8 @@ on_channel_new(SpiceSession *session, SpiceChannel *channel, gpointer data)
 {
     (void)session;
     if (SPICE_IS_MAIN_CHANNEL(channel)) {
+        GrvViewer *v = (GrvViewer *)data;
+        v->main_channel = SPICE_MAIN_CHANNEL(channel);
         g_signal_connect(channel, "channel-event",
                          G_CALLBACK(on_channel_event), data);
         g_signal_connect(channel, "main-agent-update",
@@ -351,9 +386,20 @@ on_resize_guest_toggled(GtkCheckMenuItem *item, gpointer data)
 {
     (void)data;
     GrvViewer *v = g_object_get_data(G_OBJECT(item), "grv-viewer");
-    if (v)
-        g_object_set(G_OBJECT(v->display),
-                     "resize-guest", gtk_check_menu_item_get_active(item), NULL);
+    if (!v)
+        return;
+
+    gboolean active = gtk_check_menu_item_get_active(item);
+    g_object_set(G_OBJECT(v->display), "resize-guest", active, NULL);
+
+    /* When enabling, immediately push the current window size to the guest so
+     * it resizes right away without waiting for the next window-resize event. */
+    if (active && v->main_channel) {
+        AgentResizeCtx *ctx = g_slice_new(AgentResizeCtx);
+        ctx->viewer  = v;
+        ctx->channel = v->main_channel;
+        g_idle_add(idle_push_display_size, ctx);
+    }
 }
 
 static void
@@ -503,6 +549,7 @@ grv_viewer_reconnect(GrvViewer *v,
 
     /* Build a fresh SPICE session/display pair to avoid stale channel state
      * after a full VM power cycle. */
+    v->main_channel = NULL; /* old channel is gone; on_channel_new will repopulate */
     spice_session_disconnect(old_session);
 
     SpiceSession *session = spice_session_new();
@@ -523,6 +570,9 @@ grv_viewer_reconnect(GrvViewer *v,
                  "resize-guest", resize_guest,
                  NULL);
     gtk_stack_add_named(GTK_STACK(v->stack), GTK_WIDGET(display), "display");
+    /* The window is already shown; newly added children must be shown explicitly
+     * so they receive a size allocation before on_main_agent_update fires. */
+    gtk_widget_show(GTK_WIDGET(display));
     v->session = session;
     v->display = display;
 
