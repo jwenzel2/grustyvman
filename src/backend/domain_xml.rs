@@ -2,9 +2,9 @@ use crate::backend::types::{
     BootDevice, ChangeNetworkSourceParams, ChannelInfo, ControllerInfo, CpuMode, CpuTune, DiskFormat,
     DiskInfo, DomainDetails, FilesystemInfo, FirmwareType, GraphicsInfo, GraphicsType, HostdevInfo,
     InputInfo, MemballoonModel, NetworkInfo, NetworkSourceType, NewDiskParams, NewNetworkParams,
-    PanicModel, ParallelInfo, RngBackend, SerialInfo, SmartcardMode, SoundInfo, SoundModel,
-    TpmInfo, TpmModel, UsbredirInfo, VcpuPin, VideoInfo, VideoModel, WatchdogAction, WatchdogInfo,
-    WatchdogModel,
+    NewVmNetworkConfig, PanicModel, ParallelInfo, RngBackend, SerialInfo, SmartcardMode, SoundInfo,
+    SoundModel, TpmInfo, TpmModel, UsbredirInfo, VcpuPin, VideoInfo, VideoModel, WatchdogAction,
+    WatchdogInfo, WatchdogModel,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -19,6 +19,7 @@ pub struct NewVmParams {
     pub disk_format: DiskFormat,
     pub iso_path: Option<String>,
     pub firmware: FirmwareType,
+    pub network: NewVmNetworkConfig,
 }
 
 pub fn extract_interface_targets(xml: &str) -> Vec<String> {
@@ -77,6 +78,30 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
         FirmwareType::Bios => "",
     };
 
+    let net = &params.network;
+    let (iface_type, source_elem) = match net.source_type {
+        NetworkSourceType::VirtualNetwork => (
+            "network",
+            format!(r#"<source network="{}"/>"#, net.source_value),
+        ),
+        NetworkSourceType::Bridge => (
+            "bridge",
+            format!(r#"<source bridge="{}"/>"#, net.source_value),
+        ),
+        NetworkSourceType::Macvtap => (
+            "direct",
+            format!(r#"<source dev="{}" mode="vepa"/>"#, net.source_value),
+        ),
+        NetworkSourceType::Vdpa => (
+            "vdpa",
+            format!(r#"<source dev="{}"/>"#, net.source_value),
+        ),
+    };
+    let iface_xml = format!(
+        "    <interface type=\"{iface_type}\">\n      {source_elem}\n      <model type=\"{model}\"/>\n    </interface>",
+        model = net.model.as_str(),
+    );
+
     let xml = format!(
         r#"<domain type="kvm">
   <name>{name}</name>
@@ -98,10 +123,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
       <source file="{disk_path}"/>
       <target dev="vda" bus="virtio"/>
     </disk>
-{cdrom_device}    <interface type="network">
-      <source network="default"/>
-      <model type="virtio"/>
-    </interface>
+{cdrom_device}{iface_xml}
     <graphics type="spice" autoport="yes"/>
     <video>
       <model type="virtio"/>
@@ -120,6 +142,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
         smm_feature = smm_feature,
         disk_format = params.disk_format.as_str(),
         disk_path = disk_path,
+        iface_xml = iface_xml,
         cdrom_boot = if params.iso_path.is_some() {
             "    <boot dev=\"cdrom\"/>\n"
         } else {

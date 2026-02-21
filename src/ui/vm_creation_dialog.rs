@@ -6,11 +6,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::domain_xml::NewVmParams;
-use crate::backend::types::{DiskFormat, FirmwareType, VolumeInfo};
+use crate::backend::types::{DiskFormat, FirmwareType, NetworkModel, NetworkSourceType, NewVmNetworkConfig, VolumeInfo};
 
 pub fn show_creation_dialog(
     parent: &adw::ApplicationWindow,
     pool_volumes: Vec<(String, Vec<VolumeInfo>)>,
+    virtual_networks: Vec<String>,
     on_create: impl Fn(NewVmParams) + 'static,
 ) {
     let dialog = gtk::Window::new();
@@ -109,6 +110,83 @@ pub fn show_creation_dialog(
     iso_group.add(&iso_row);
     content.append(&iso_group);
 
+    // Network group
+    let network_group = adw::PreferencesGroup::new();
+    network_group.set_title("Network");
+
+    // Source type
+    let src_labels: Vec<&str> = NetworkSourceType::ALL.iter().map(|s| s.label()).collect();
+    let src_list = gtk::StringList::new(&src_labels);
+    let src_type_row = adw::ComboRow::new();
+    src_type_row.set_title("Network Source");
+    src_type_row.set_model(Some(&src_list));
+    src_type_row.set_selected(0); // Virtual Network
+    network_group.add(&src_type_row);
+
+    // Virtual network picker row (visible when source = VirtualNetwork)
+    let virt_net_labels: Vec<&str> = virtual_networks.iter().map(|s| s.as_str()).collect();
+    let virt_net_row = adw::ComboRow::new();
+    virt_net_row.set_title("Virtual Network");
+    if virtual_networks.is_empty() {
+        let empty_list = gtk::StringList::new(&["(none)"]);
+        virt_net_row.set_model(Some(&empty_list));
+        virt_net_row.set_sensitive(false);
+    } else {
+        let virt_net_list = gtk::StringList::new(&virt_net_labels);
+        virt_net_row.set_model(Some(&virt_net_list));
+        // Select "default" if present, else index 0
+        let default_idx = virtual_networks.iter().position(|n| n == "default").unwrap_or(0);
+        virt_net_row.set_selected(default_idx as u32);
+    }
+    network_group.add(&virt_net_row);
+
+    // Device name entry row (for Bridge / Macvtap / vDPA)
+    let dev_entry_row = adw::EntryRow::new();
+    dev_entry_row.set_title("Device Name");
+    dev_entry_row.set_visible(false);
+    network_group.add(&dev_entry_row);
+
+    // Model
+    let model_labels: Vec<&str> = NetworkModel::ALL.iter().map(|m| m.label()).collect();
+    let model_list = gtk::StringList::new(&model_labels);
+    let model_row = adw::ComboRow::new();
+    model_row.set_title("Model");
+    model_row.set_model(Some(&model_list));
+    model_row.set_selected(0); // virtio
+    network_group.add(&model_row);
+
+    content.append(&network_group);
+
+    // Wire up source type selection to show/hide rows
+    let virt_net_row_clone = virt_net_row.clone();
+    let dev_entry_row_clone = dev_entry_row.clone();
+    src_type_row.connect_notify_local(Some("selected"), move |row, _| {
+        let idx = row.selected() as usize;
+        let src = NetworkSourceType::ALL.get(idx).copied().unwrap_or(NetworkSourceType::VirtualNetwork);
+        match src {
+            NetworkSourceType::VirtualNetwork => {
+                virt_net_row_clone.set_visible(true);
+                dev_entry_row_clone.set_visible(false);
+                dev_entry_row_clone.set_title("Device Name");
+            }
+            NetworkSourceType::Bridge => {
+                virt_net_row_clone.set_visible(false);
+                dev_entry_row_clone.set_title("Bridge Device");
+                dev_entry_row_clone.set_visible(true);
+            }
+            NetworkSourceType::Macvtap => {
+                virt_net_row_clone.set_visible(false);
+                dev_entry_row_clone.set_title("Macvtap Device");
+                dev_entry_row_clone.set_visible(true);
+            }
+            NetworkSourceType::Vdpa => {
+                virt_net_row_clone.set_visible(false);
+                dev_entry_row_clone.set_title("vDPA Device");
+                dev_entry_row_clone.set_visible(true);
+            }
+        }
+    });
+
     // Browse button handler — opens the libvirt storage volume picker
     let iso_path_clone = iso_path.clone();
     let iso_row_clone = iso_row.clone();
@@ -162,6 +240,18 @@ pub fn show_creation_dialog(
         let fmt_idx = format_row.selected() as usize;
         let disk_format = DiskFormat::ALL.get(fmt_idx).copied().unwrap_or(DiskFormat::Qcow2);
 
+        let src_idx = src_type_row.selected() as usize;
+        let source_type = NetworkSourceType::ALL.get(src_idx).copied().unwrap_or(NetworkSourceType::VirtualNetwork);
+        let source_value = match source_type {
+            NetworkSourceType::VirtualNetwork => {
+                let idx = virt_net_row.selected() as usize;
+                virtual_networks.get(idx).cloned().unwrap_or_else(|| "default".to_string())
+            }
+            _ => dev_entry_row.text().to_string(),
+        };
+        let model_idx = model_row.selected() as usize;
+        let model = NetworkModel::ALL.get(model_idx).copied().unwrap_or(NetworkModel::Virtio);
+
         let params = NewVmParams {
             name: name_row.text().to_string(),
             vcpus: cpu_row.value() as u32,
@@ -170,6 +260,7 @@ pub fn show_creation_dialog(
             disk_format,
             iso_path: iso_path.borrow().clone(),
             firmware,
+            network: NewVmNetworkConfig { source_type, source_value, model },
         };
 
         if params.name.is_empty() {

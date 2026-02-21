@@ -639,6 +639,62 @@ pub struct CpuTune {
 // --- VM Types ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkModel {
+    Virtio,
+    E1000,
+    E1000e,
+    Rtl8139,
+    Vmxnet3,
+}
+
+impl NetworkModel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NetworkModel::Virtio => "virtio",
+            NetworkModel::E1000 => "e1000",
+            NetworkModel::E1000e => "e1000e",
+            NetworkModel::Rtl8139 => "rtl8139",
+            NetworkModel::Vmxnet3 => "vmxnet3",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            NetworkModel::Virtio => "virtio",
+            NetworkModel::E1000 => "e1000",
+            NetworkModel::E1000e => "e1000e",
+            NetworkModel::Rtl8139 => "rtl8139",
+            NetworkModel::Vmxnet3 => "vmxnet3",
+        }
+    }
+
+    pub const ALL: &[NetworkModel] = &[
+        NetworkModel::Virtio,
+        NetworkModel::E1000,
+        NetworkModel::E1000e,
+        NetworkModel::Rtl8139,
+        NetworkModel::Vmxnet3,
+    ];
+}
+
+#[derive(Debug, Clone)]
+pub struct NewVmNetworkConfig {
+    pub source_type: NetworkSourceType,
+    pub source_value: String, // network name, bridge dev, macvtap dev, or vdpa dev path
+    pub model: NetworkModel,
+}
+
+impl Default for NewVmNetworkConfig {
+    fn default() -> Self {
+        Self {
+            source_type: NetworkSourceType::VirtualNetwork,
+            source_value: "default".to_string(),
+            model: NetworkModel::Virtio,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskFormat {
     Qcow2,
     Raw,

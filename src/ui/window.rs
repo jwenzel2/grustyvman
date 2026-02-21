@@ -1841,22 +1841,29 @@ impl Window {
         let uri = self.imp().connection_uri.borrow().clone();
         let win = self.downgrade();
 
-        // Fetch storage pool volumes via libvirt so the creation dialog can
-        // offer them for ISO selection without needing direct filesystem access.
-        let rx = spawn_blocking({
+        // Fetch storage pool volumes and virtual networks in parallel so the
+        // creation dialog can offer ISO selection and network source picking.
+        let rx_vols = spawn_blocking({
             let uri = uri.clone();
             move || backend::storage::list_all_pool_volumes(&uri)
         });
+        let rx_nets = spawn_blocking({
+            let uri = uri.clone();
+            move || backend::domain::list_networks(&uri)
+        });
 
         glib::spawn_future_local(async move {
-            let Ok(pool_volumes) = rx.recv().await else { return };
+            let Ok(pool_volumes) = rx_vols.recv().await else { return };
+            let Ok(networks) = rx_nets.recv().await else { return };
             let Some(win) = win.upgrade() else { return };
             let pool_volumes = pool_volumes.unwrap_or_default();
+            let virtual_networks = networks.unwrap_or_default();
 
             let win_weak = win.downgrade();
             crate::ui::vm_creation_dialog::show_creation_dialog(
                 win.upcast_ref(),
                 pool_volumes,
+                virtual_networks,
                 move |params| {
                     let Some(win) = win_weak.upgrade() else { return };
                     let uri = win.imp().connection_uri.borrow().clone();
