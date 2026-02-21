@@ -16,6 +16,7 @@ pub fn show_clone_vm_dialog(
     let dialog = gtk::Window::new();
     dialog.set_title(Some("Clone VM"));
     dialog.set_default_size(400, 280);
+    dialog.set_decorated(false);
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
 

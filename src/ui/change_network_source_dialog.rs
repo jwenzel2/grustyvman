@@ -14,6 +14,7 @@ pub fn show_change_network_source_dialog(
     let dialog = gtk::Window::new();
     dialog.set_title(Some("Change Network Source"));
     dialog.set_default_size(420, -1);
+    dialog.set_decorated(false);
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
 

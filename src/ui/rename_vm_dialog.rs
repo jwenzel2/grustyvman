@@ -11,6 +11,7 @@ pub fn show_rename_vm_dialog(
     let dialog = gtk::Window::new();
     dialog.set_title(Some("Rename VM"));
     dialog.set_default_size(380, 200);
+    dialog.set_decorated(false);
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
 

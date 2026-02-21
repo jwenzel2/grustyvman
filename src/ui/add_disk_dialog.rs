@@ -15,6 +15,7 @@ pub fn show_add_disk_dialog(
     let dialog = gtk::Window::new();
     dialog.set_title(Some("Add Disk"));
     dialog.set_default_size(480, 500);
+    dialog.set_decorated(false);
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
 
