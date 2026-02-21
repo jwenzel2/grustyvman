@@ -1,4 +1,3 @@
-use glib::prelude::*;
 use gtk4 as gtk;
 use gtk::prelude::*;
 use libadwaita as adw;
@@ -21,11 +20,15 @@ pub struct PoolDetailsView {
     available_row: adw::ActionRow,
     level_bar: gtk::LevelBar,
     volumes_group: adw::PreferencesGroup,
+    /// Rows currently displayed in volumes_group — tracked so we can remove
+    /// them reliably on the next update() call without walking the widget tree.
+    volume_rows: std::cell::RefCell<Vec<adw::ActionRow>>,
     pub btn_start: gtk::Button,
     pub btn_stop: gtk::Button,
     pub btn_refresh: gtk::Button,
     pub btn_delete: gtk::Button,
     on_add_volume: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>,
+    on_upload_volume: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>>,
     on_delete_volume: std::cell::RefCell<Option<std::rc::Rc<dyn Fn(String)>>>,
     on_set_autostart: std::cell::RefCell<Option<std::rc::Rc<dyn Fn(bool)>>>,
 }
@@ -153,11 +156,13 @@ impl PoolDetailsView {
             available_row,
             level_bar,
             volumes_group,
+            volume_rows: std::cell::RefCell::new(Vec::new()),
             btn_start,
             btn_stop,
             btn_refresh,
             btn_delete,
             on_add_volume: std::cell::RefCell::new(None),
+            on_upload_volume: std::cell::RefCell::new(None),
             on_delete_volume: std::cell::RefCell::new(None),
             on_set_autostart: std::cell::RefCell::new(None),
         }
@@ -165,6 +170,10 @@ impl PoolDetailsView {
 
     pub fn set_on_add_volume(&self, f: impl Fn() + 'static) {
         *self.on_add_volume.borrow_mut() = Some(std::rc::Rc::new(f));
+    }
+
+    pub fn set_on_upload_volume(&self, f: impl Fn() + 'static) {
+        *self.on_upload_volume.borrow_mut() = Some(std::rc::Rc::new(f));
     }
 
     pub fn set_on_delete_volume(&self, f: impl Fn(String) + 'static) {
@@ -211,15 +220,41 @@ impl PoolDetailsView {
         self.btn_refresh.set_sensitive(info.active);
         self.btn_delete.set_sensitive(true);
 
-        // Volumes
-        clear_pref_group(&self.volumes_group);
+        // Remove previously tracked volume rows, then clear the list.
+        {
+            let rows = self.volume_rows.borrow();
+            for row in rows.iter() {
+                self.volumes_group.remove(row);
+            }
+        }
+        self.volume_rows.borrow_mut().clear();
 
-        // Add volume button in header suffix
+        // Clear header suffix.
+        self.volumes_group.set_header_suffix(None::<&gtk::Widget>);
+
+        // Header suffix: upload button + add button
+        let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+        let upload_vol_btn = gtk::Button::from_icon_name("document-open-symbolic");
+        upload_vol_btn.set_tooltip_text(Some("Upload Image to Pool"));
+        upload_vol_btn.set_valign(gtk::Align::Center);
+        upload_vol_btn.set_sensitive(info.active);
+        header_box.append(&upload_vol_btn);
+
         let add_vol_btn = gtk::Button::from_icon_name("list-add-symbolic");
-        add_vol_btn.set_tooltip_text(Some("Add Volume"));
+        add_vol_btn.set_tooltip_text(Some("Create Volume"));
         add_vol_btn.set_valign(gtk::Align::Center);
         add_vol_btn.set_sensitive(info.active);
-        self.volumes_group.set_header_suffix(Some(&add_vol_btn));
+        header_box.append(&add_vol_btn);
+
+        self.volumes_group.set_header_suffix(Some(&header_box));
+
+        if let Some(ref cb) = *self.on_upload_volume.borrow() {
+            let cb = cb.clone();
+            upload_vol_btn.connect_clicked(move |_| {
+                cb();
+            });
+        }
 
         if let Some(ref cb) = *self.on_add_volume.borrow() {
             let cb = cb.clone();
@@ -233,6 +268,7 @@ impl PoolDetailsView {
             row.set_title("No volumes");
             row.set_activatable(false);
             self.volumes_group.add(&row);
+            self.volume_rows.borrow_mut().push(row);
         } else {
             for vol in volumes {
                 let row = adw::ActionRow::new();
@@ -260,25 +296,8 @@ impl PoolDetailsView {
                 }
 
                 self.volumes_group.add(&row);
+                self.volume_rows.borrow_mut().push(row);
             }
         }
-    }
-}
-
-fn clear_pref_group(group: &adw::PreferencesGroup) {
-    // Remove header suffix first
-    group.set_header_suffix(None::<&gtk::Widget>);
-
-    let mut rows_to_remove = Vec::new();
-    let mut child = group.first_child();
-    while let Some(c) = child {
-        let next = c.next_sibling();
-        if c.downcast_ref::<adw::ActionRow>().is_some() {
-            rows_to_remove.push(c);
-        }
-        child = next;
-    }
-    for row in rows_to_remove {
-        group.remove(&row);
     }
 }

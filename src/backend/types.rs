@@ -501,6 +501,7 @@ pub struct VideoInfo {
     pub model: VideoModel,
     pub vram: Option<u32>,
     pub heads: Option<u32>,
+    pub accel3d: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,7 +916,7 @@ pub enum ConfigAction {
     ChangeNetworkSource(String, ChangeNetworkSourceParams), // (mac, params)
     SetAutostart(bool),
     ModifyGraphics(GraphicsType),
-    ModifyVideo(VideoModel),
+    ModifyVideo(VideoModel, bool),
     ModifySound(SoundModel),
     EjectCdrom(String),
     InsertCdrom(String, String),

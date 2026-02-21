@@ -871,6 +871,13 @@ impl Window {
 
         // Volume callbacks
         let win = self.downgrade();
+        imp.pool_details_view.set_on_upload_volume(move || {
+            if let Some(win) = win.upgrade() {
+                win.show_upload_volume_dialog();
+            }
+        });
+
+        let win = self.downgrade();
         imp.pool_details_view.set_on_add_volume(move || {
             if let Some(win) = win.upgrade() {
                 win.show_create_volume_dialog();
@@ -1500,6 +1507,41 @@ impl Window {
                     }
                     Err(e) => {
                         win.show_toast(&format!("Failed to create volume: {e}"));
+                    }
+                }
+            });
+        });
+    }
+
+    fn show_upload_volume_dialog(&self) {
+        let win = self.downgrade();
+        crate::ui::upload_volume_dialog::show_upload_volume_dialog(self.upcast_ref(), move |src_path, vol_name| {
+            let Some(win) = win.upgrade() else { return };
+            let uri = win.imp().connection_uri.borrow().clone();
+            let pool_uuid = win.imp().selected_pool_uuid.borrow().clone();
+            let Some(pool_uuid) = pool_uuid else { return };
+
+            win.show_toast("Uploading…");
+
+            let rx = spawn_blocking(move || {
+                crate::backend::storage::upload_volume(&uri, &pool_uuid, &src_path, &vol_name)
+            });
+
+            let win2 = win.downgrade();
+            let pool_uuid2 = win.imp().selected_pool_uuid.borrow().clone();
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.recv().await else { return };
+                let Some(win) = win2.upgrade() else { return };
+
+                match result {
+                    Ok(()) => {
+                        win.show_toast("Image uploaded successfully");
+                        if let Some(uuid) = pool_uuid2 {
+                            win.load_pool_details(&uuid);
+                        }
+                    }
+                    Err(e) => {
+                        win.show_toast(&format!("Upload failed: {e}"));
                     }
                 }
             });
@@ -2457,9 +2499,9 @@ impl Window {
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }
-            ConfigAction::ModifyVideo(vmodel) => {
+            ConfigAction::ModifyVideo(vmodel, accel3d) => {
                 let xml = backend::domain::get_domain_xml(uri, uuid)?;
-                let xml = backend::domain_xml::modify_video(&xml, vmodel)?;
+                let xml = backend::domain_xml::modify_video(&xml, vmodel, accel3d)?;
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }

@@ -9,6 +9,7 @@ pub mod create_network_dialog;
 pub mod create_pool_dialog;
 pub mod create_snapshot_dialog;
 pub mod create_volume_dialog;
+pub mod upload_volume_dialog;
 pub mod network_details_view;
 pub mod network_row;
 pub mod perf_graph;

@@ -1,6 +1,7 @@
-use virt::connect::Connect;
 use virt::storage_pool::StoragePool;
 use virt::storage_vol::StorageVol;
+use virt::stream::Stream;
+use crate::backend::connection::get_conn;
 
 use crate::backend::types::{PoolCreateParams, PoolInfo, PoolState, VolumeInfo, VolumeType};
 use crate::error::AppError;
@@ -9,13 +10,13 @@ fn with_pool<F, R>(uri: &str, uuid: &str, f: F) -> Result<R, AppError>
 where
     F: FnOnce(&StoragePool) -> Result<R, AppError>,
 {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let pool = StoragePool::lookup_by_uuid_string(&conn, uuid)?;
     f(&pool)
 }
 
 pub fn list_all_pools(uri: &str) -> Result<Vec<PoolInfo>, AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let pools = conn.list_all_storage_pools(0)?;
 
     let mut result = Vec::new();
@@ -95,7 +96,7 @@ pub fn create_pool(
 ) -> Result<(), AppError> {
     let xml = build_pool_xml(name, pool_type, params);
 
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let pool = StoragePool::define_xml(&conn, &xml, 0)?;
     let _ = pool.build(0);
     pool.create(0)?;
@@ -153,7 +154,7 @@ fn build_pool_xml(name: &str, pool_type: &str, params: &PoolCreateParams) -> Str
 /// the VM config dialog so images can be chosen via libvirt without requiring direct filesystem
 /// access (the directory may be owned by root/qemu).
 pub fn list_all_pool_volumes(uri: &str) -> Result<Vec<(String, Vec<VolumeInfo>)>, AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let pools = conn.list_all_storage_pools(0)?;
 
     let mut result = Vec::new();
@@ -258,7 +259,7 @@ pub fn create_vm_disk(
     format: &str,
     extension: &str,
 ) -> Result<String, AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let pools = conn.list_all_storage_pools(0)?;
 
     // Prefer "default"; fall back to the first active pool.
@@ -291,10 +292,76 @@ pub fn create_vm_disk(
 /// Delete a storage volume by its absolute path. Ignores errors from volumes
 /// that are not tracked by any pool (e.g. manually placed files).
 pub fn delete_volume_by_path(uri: &str, path: &str) -> Result<(), AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let vol = StorageVol::lookup_by_path(&conn, path)?;
     vol.delete(0)?;
     Ok(())
+}
+
+/// Upload a local file into a storage pool volume via the libvirt stream API.
+/// The daemon handles file creation and permissions — no direct filesystem
+/// access required, so this works even when the pool directory is root-owned.
+pub fn upload_volume(
+    uri: &str,
+    pool_uuid: &str,
+    src_path: &str,
+    vol_name: &str,
+) -> Result<(), AppError> {
+    use std::io::Read;
+
+    let file_size = std::fs::metadata(src_path)
+        .map_err(|e| AppError::Io(e))?
+        .len();
+
+    let format = if src_path.ends_with(".qcow2") { "qcow2" } else { "raw" };
+
+    let conn = get_conn(uri)?;
+    let pool = StoragePool::lookup_by_uuid_string(&conn, pool_uuid)?;
+
+    let xml = format!(
+        r#"<volume>
+  <name>{vol_name}</name>
+  <capacity unit="bytes">{file_size}</capacity>
+  <target>
+    <format type="{format}"/>
+  </target>
+</volume>"#
+    );
+    let vol = StorageVol::create_xml(&pool, &xml, 0)?;
+
+    let stream = Stream::new(&conn, 0).map_err(|e| AppError::Libvirt(e.to_string()))?;
+    vol.upload(&stream, 0, file_size, 0)?;
+
+    let send_result: Result<(), AppError> = (|| {
+        let mut file = std::fs::File::open(src_path).map_err(|e| AppError::Io(e))?;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = file.read(&mut buf).map_err(|e| AppError::Io(e))?;
+            if n == 0 {
+                break;
+            }
+            let mut sent = 0;
+            while sent < n {
+                let s = stream
+                    .send(&buf[sent..n])
+                    .map_err(|e| AppError::Libvirt(e.to_string()))?;
+                sent += s;
+            }
+        }
+        Ok(())
+    })();
+
+    match send_result {
+        Ok(()) => {
+            stream.finish().map_err(|e| AppError::Libvirt(e.to_string()))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = stream.abort();
+            let _ = vol.delete(0);
+            Err(e)
+        }
+    }
 }
 
 pub fn extract_pool_type_and_path(xml: &str) -> (String, String) {

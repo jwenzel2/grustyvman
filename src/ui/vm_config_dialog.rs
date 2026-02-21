@@ -1379,6 +1379,29 @@ pub fn show_config_dialog(
     video_row.set_selected(current_vid_idx as u32);
     video_group.add(&video_row);
 
+    let accel3d_row = adw::SwitchRow::new();
+    accel3d_row.set_title("3D Acceleration");
+    let current_accel3d = details
+        .video
+        .as_ref()
+        .map(|v| v.accel3d)
+        .unwrap_or(false);
+    accel3d_row.set_active(current_accel3d);
+    let is_virtio = VideoModel::ALL
+        .get(current_vid_idx)
+        .copied()
+        .unwrap_or(VideoModel::None)
+        == VideoModel::Virtio;
+    accel3d_row.set_visible(is_virtio);
+    video_group.add(&accel3d_row);
+
+    let accel3d_row_ref = accel3d_row.clone();
+    video_row.connect_selected_notify(move |row| {
+        let idx = row.selected() as usize;
+        let model = VideoModel::ALL.get(idx).copied().unwrap_or(VideoModel::None);
+        accel3d_row_ref.set_visible(model == VideoModel::Virtio);
+    });
+
     display_page.add(&video_group);
 
     // Sound group
@@ -1416,12 +1439,13 @@ pub fn show_config_dialog(
 
         let vid_idx = video_row.selected() as usize;
         let vid = VideoModel::ALL.get(vid_idx).copied().unwrap_or(VideoModel::None);
+        let accel3d = accel3d_row.is_active();
 
         let snd_idx = sound_row.selected() as usize;
         let snd = SoundModel::ALL.get(snd_idx).copied().unwrap_or(SoundModel::None);
 
         on_action_display(ConfigAction::ModifyGraphics(gfx));
-        on_action_display(ConfigAction::ModifyVideo(vid));
+        on_action_display(ConfigAction::ModifyVideo(vid, accel3d));
         on_action_display(ConfigAction::ModifySound(snd));
         window_ref.close();
     });

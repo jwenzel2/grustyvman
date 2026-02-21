@@ -1,12 +1,12 @@
-use virt::connect::Connect;
 use virt::domain::Domain;
+use crate::backend::connection::get_conn;
 use crate::error::AppError;
 
 pub(crate) fn with_domain<F, R>(uri: &str, uuid: &str, f: F) -> Result<R, AppError>
 where
     F: FnOnce(&Domain) -> Result<R, AppError>,
 {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let domain = Domain::lookup_by_uuid_string(&conn, uuid)?;
     f(&domain)
 }
@@ -118,7 +118,7 @@ pub fn get_domain_name(uri: &str, uuid: &str) -> Result<String, AppError> {
 }
 
 pub fn update_domain_xml(uri: &str, xml: &str) -> Result<(), AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     Domain::define_xml(&conn, xml)?;
     Ok(())
 }
@@ -155,7 +155,7 @@ pub fn create_disk_image(path: &str, size_gib: u64) -> Result<(), AppError> {
 }
 
 pub fn list_networks(uri: &str) -> Result<Vec<String>, AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let networks = conn.list_networks()?;
     Ok(networks)
 }

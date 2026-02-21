@@ -183,7 +183,7 @@ pub fn create_vm(uri: &str, params: &NewVmParams) -> Result<(), AppError> {
 
     let xml = generate_domain_xml(params, &disk_path);
 
-    let conn = virt::connect::Connect::open(Some(uri))?;
+    let conn = crate::backend::connection::get_conn(uri)?;
     let domain = virt::domain::Domain::define_xml(&conn, &xml)?;
     drop(domain);
 
@@ -283,6 +283,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     let mut in_os = false;
     let mut in_cpu = false;
     let mut in_video = false;
+    let mut in_video_model = false;
     let mut in_cputune = false;
     let mut in_tpm = false;
     let mut tpm_model = String::new();
@@ -521,7 +522,18 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                             model: vtype,
                             vram,
                             heads,
+                            accel3d: false,
                         });
+                        in_video_model = true;
+                    }
+                    "acceleration" if in_video_model => {
+                        let accel3d = e.attributes().flatten().any(|attr| {
+                            attr.key.as_ref() == b"accel3d"
+                                && String::from_utf8_lossy(&attr.value) == "yes"
+                        });
+                        if let Some(ref mut v) = details.video {
+                            v.accel3d = accel3d;
+                        }
                     }
                     "model" if matches!(context, Context::Interface(_)) => {
                         if let Context::Interface(ref mut ib) = context {
@@ -880,8 +892,12 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     "devices" => {
                         in_devices = false;
                     }
+                    "model" if in_video_model => {
+                        in_video_model = false;
+                    }
                     "video" => {
                         in_video = false;
+                        in_video_model = false;
                     }
                     "tpm" => {
                         if in_tpm {
@@ -1097,7 +1113,7 @@ pub fn modify_graphics(xml: &str, graphics_type: GraphicsType) -> Result<String,
     Ok(result)
 }
 
-pub fn modify_video(xml: &str, video_model: VideoModel) -> Result<String, AppError> {
+pub fn modify_video(xml: &str, video_model: VideoModel, accel3d: bool) -> Result<String, AppError> {
     let mut result = String::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -1150,10 +1166,18 @@ pub fn modify_video(xml: &str, video_model: VideoModel) -> Result<String, AppErr
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if name == "devices" {
                     if video_model != VideoModel::None {
-                        result.push_str(&format!(
-                            r#"<video><model type="{}"/></video>"#,
-                            video_model.as_str()
-                        ));
+                        if video_model == VideoModel::Virtio {
+                            let accel_val = if accel3d { "yes" } else { "no" };
+                            result.push_str(&format!(
+                                r#"<video><model type="virtio"><acceleration accel3d="{}"/></model></video>"#,
+                                accel_val
+                            ));
+                        } else {
+                            result.push_str(&format!(
+                                r#"<video><model type="{}"/></video>"#,
+                                video_model.as_str()
+                            ));
+                        }
                     }
                     in_devices = false;
                 }

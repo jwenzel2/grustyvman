@@ -1,5 +1,5 @@
-use virt::connect::Connect;
 use virt::network::Network;
+use crate::backend::connection::get_conn;
 
 use crate::backend::types::{
     ForwardMode, NetworkCreateParams, NetworkState, VirtNetworkInfo,
@@ -10,13 +10,13 @@ fn with_network<F, R>(uri: &str, uuid: &str, f: F) -> Result<R, AppError>
 where
     F: FnOnce(&Network) -> Result<R, AppError>,
 {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let network = Network::lookup_by_uuid_string(&conn, uuid)?;
     f(&network)
 }
 
 pub fn list_all_networks(uri: &str) -> Result<Vec<VirtNetworkInfo>, AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let networks = conn.list_all_networks(0)?;
 
     let mut result = Vec::new();
@@ -87,7 +87,7 @@ pub fn set_network_autostart(uri: &str, uuid: &str, autostart: bool) -> Result<(
 
 pub fn create_network(uri: &str, params: &NetworkCreateParams) -> Result<(), AppError> {
     let xml = build_network_xml(params);
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let network = Network::define_xml(&conn, &xml)?;
     let _ = network.create();
     Ok(())

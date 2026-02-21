@@ -1,5 +1,5 @@
-use virt::connect::Connect;
 use virt::domain::Domain;
+use crate::backend::connection::get_conn;
 
 use crate::backend::types::RawPerfSample;
 use crate::error::AppError;
@@ -10,7 +10,7 @@ pub fn collect_perf_sample(
     disk_targets: &[String],
     iface_targets: &[String],
 ) -> Result<RawPerfSample, AppError> {
-    let conn = Connect::open(Some(uri))?;
+    let conn = get_conn(uri)?;
     let domain = Domain::lookup_by_uuid_string(&conn, uuid)?;
 
     let info = domain.get_info()?;
