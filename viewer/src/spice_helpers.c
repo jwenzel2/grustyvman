@@ -191,8 +191,38 @@ on_channel_event(SpiceChannel *channel, SpiceChannelEvent event, gpointer data)
     }
 }
 
+/* Called whenever the spice-vdagent connection state changes.
+ *
+ * When the agent first becomes available we push the current display
+ * dimensions so the guest resizes immediately — without this the guest
+ * keeps its original resolution until the user manually resizes the window.
+ * This is the same mechanism virt-manager uses. */
+static void
+on_main_agent_update(SpiceMainChannel *channel, gpointer data)
+{
+    GrvViewer *v = (GrvViewer *)data;
+    if (!v->display)
+        return;
+
+    gboolean agent_connected = FALSE;
+    g_object_get(G_OBJECT(channel), "agent-connected", &agent_connected, NULL);
+    if (!agent_connected)
+        return;
+
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(GTK_WIDGET(v->display), &alloc);
+    if (alloc.width <= 1 || alloc.height <= 1)
+        return;
+
+    spice_main_channel_update_display_enabled(channel, 0, TRUE, FALSE);
+    spice_main_channel_update_display(channel, 0, 0, 0,
+                                      alloc.width, alloc.height, TRUE);
+}
+
 /* SpiceSession emits "channel-new" for every channel it creates.
- * We hook "channel-event" on the main channel so we know when it goes away. */
+ * We hook "channel-event" on the main channel so we know when it goes away,
+ * and "main-agent-update" so we can push the initial display size as soon
+ * as spice-vdagent connects on the guest. */
 static void
 on_channel_new(SpiceSession *session, SpiceChannel *channel, gpointer data)
 {
@@ -200,6 +230,8 @@ on_channel_new(SpiceSession *session, SpiceChannel *channel, gpointer data)
     if (SPICE_IS_MAIN_CHANNEL(channel)) {
         g_signal_connect(channel, "channel-event",
                          G_CALLBACK(on_channel_event), data);
+        g_signal_connect(channel, "main-agent-update",
+                         G_CALLBACK(on_main_agent_update), data);
     }
 }
 
