@@ -149,6 +149,45 @@ fn build_pool_xml(name: &str, pool_type: &str, params: &PoolCreateParams) -> Str
     xml
 }
 
+/// Returns all active pools paired with their volumes. Used by the storage volume picker in
+/// the VM config dialog so images can be chosen via libvirt without requiring direct filesystem
+/// access (the directory may be owned by root/qemu).
+pub fn list_all_pool_volumes(uri: &str) -> Result<Vec<(String, Vec<VolumeInfo>)>, AppError> {
+    let conn = Connect::open(Some(uri))?;
+    let pools = conn.list_all_storage_pools(0)?;
+
+    let mut result = Vec::new();
+    for pool in &pools {
+        if !pool.is_active().unwrap_or(false) {
+            continue;
+        }
+        let name = pool.get_name().unwrap_or_default();
+        let vol_names = pool.list_volumes().unwrap_or_default();
+        let mut volumes = Vec::new();
+        for vol_name in &vol_names {
+            if let Ok(vol) = StorageVol::lookup_by_name(pool, vol_name) {
+                let path = vol.get_path().unwrap_or_default();
+                let info = vol.get_info().unwrap_or(virt::storage_vol::StorageVolInfo {
+                    kind: 0,
+                    capacity: 0,
+                    allocation: 0,
+                });
+                volumes.push(VolumeInfo {
+                    name: vol_name.clone(),
+                    path,
+                    kind: VolumeType::from_libvirt(info.kind),
+                    capacity: info.capacity,
+                    allocation: info.allocation,
+                });
+            }
+        }
+        volumes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        result.push((name, volumes));
+    }
+    result.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    Ok(result)
+}
+
 pub fn list_pool_volumes(uri: &str, pool_uuid: &str) -> Result<Vec<VolumeInfo>, AppError> {
     with_pool(uri, pool_uuid, |pool| {
         let vol_names = pool.list_volumes().unwrap_or_default();

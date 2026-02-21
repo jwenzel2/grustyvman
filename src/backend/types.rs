@@ -825,12 +825,14 @@ pub enum ConfigAction {
     RemoveDisk(String),
     AddNetwork(NewNetworkParams),
     RemoveNetwork(String),
+    ChangeNetworkSource(String, ChangeNetworkSourceParams), // (mac, params)
     SetAutostart(bool),
     ModifyGraphics(GraphicsType),
     ModifyVideo(VideoModel),
     ModifySound(SoundModel),
     EjectCdrom(String),
     InsertCdrom(String, String),
+    ChangeDiskImage(String, String), // (target_dev, new_image_path)
     ApplyCpuTune(CpuTune),
     ModifyTpm(TpmModel),
     AddFilesystem(FilesystemInfo),
@@ -841,6 +843,19 @@ pub enum ConfigAction {
     RemoveSerial(SerialInfo),
     ModifyRng(Option<RngBackend>),
     ModifyWatchdog(WatchdogModel, WatchdogAction),
+    AddInput(InputInfo),
+    RemoveInput(InputInfo),
+    AddChannel(ChannelInfo),
+    RemoveChannel(String), // target_name
+    AddController(ControllerInfo),
+    RemoveController(ControllerInfo),
+    AddParallel,
+    RemoveParallel(u32),   // by port number
+    ModifyPanic(PanicModel),
+    AddUsbredir,
+    RemoveUsbredir(u32),   // by index
+    ModifySmartcard(SmartcardMode),
+    ModifyMemballoon(MemballoonModel),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -932,8 +947,66 @@ pub struct DiskInfo {
 #[derive(Debug, Clone)]
 pub struct NetworkInfo {
     pub mac_address: Option<String>,
-    pub source_network: Option<String>,
+    pub interface_type: String,       // "network", "bridge", "direct", "vdpa"
+    pub source_network: Option<String>, // for type="network"
+    pub source_bridge: Option<String>,  // for type="bridge"
+    pub source_dev: Option<String>,     // for type="direct" or "vdpa"
     pub model_type: Option<String>,
+}
+
+impl NetworkInfo {
+    pub fn display_source(&self) -> String {
+        match self.interface_type.as_str() {
+            "bridge" => format!(
+                "Bridge: {}",
+                self.source_bridge.as_deref().unwrap_or("N/A")
+            ),
+            "direct" => format!(
+                "Macvtap: {}",
+                self.source_dev.as_deref().unwrap_or("N/A")
+            ),
+            "vdpa" => format!(
+                "vDPA: {}",
+                self.source_dev.as_deref().unwrap_or("N/A")
+            ),
+            _ => format!(
+                "Network: {}",
+                self.source_network.as_deref().unwrap_or("N/A")
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkSourceType {
+    VirtualNetwork,
+    Bridge,
+    Macvtap,
+    Vdpa,
+}
+
+impl NetworkSourceType {
+    pub const ALL: &'static [NetworkSourceType] = &[
+        NetworkSourceType::VirtualNetwork,
+        NetworkSourceType::Bridge,
+        NetworkSourceType::Macvtap,
+        NetworkSourceType::Vdpa,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            NetworkSourceType::VirtualNetwork => "Virtual Network",
+            NetworkSourceType::Bridge => "Bridge Device",
+            NetworkSourceType::Macvtap => "Macvtap Device",
+            NetworkSourceType::Vdpa => "vDPA Device",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangeNetworkSourceParams {
+    pub source_type: NetworkSourceType,
+    pub value: String, // network name, bridge dev, or device path
 }
 
 #[derive(Debug, Clone)]
@@ -1142,6 +1215,258 @@ pub struct WatchdogInfo {
     pub action: WatchdogAction,
 }
 
+// --- Input Device Types ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputInfo {
+    pub input_type: String, // "tablet", "mouse", "keyboard"
+    pub bus: String,        // "usb", "virtio", "ps2"
+}
+
+impl InputInfo {
+    pub fn display_name(&self) -> String {
+        let bus = match self.bus.as_str() {
+            "virtio" => "VirtIO",
+            "usb" => "USB",
+            "ps2" => "PS/2",
+            other => other,
+        };
+        let kind = match self.input_type.as_str() {
+            "tablet" => "Tablet",
+            "mouse" => "Mouse",
+            "keyboard" => "Keyboard",
+            other => other,
+        };
+        format!("{bus} {kind}")
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        format!("type={}, bus={}", self.input_type, self.bus)
+    }
+}
+
+// --- Controller Types ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerInfo {
+    pub controller_type: String, // "usb", "scsi", "virtio-serial"
+    pub model: Option<String>,   // "qemu-xhci", "virtio-scsi", etc.
+    pub index: u32,
+}
+
+impl ControllerInfo {
+    pub fn display_name(&self) -> String {
+        match self.controller_type.as_str() {
+            "usb" => match self.model.as_deref() {
+                Some("qemu-xhci") => "USB 3.0 Controller (xHCI)".to_string(),
+                Some("ich9-ehci1") | Some("ich9-uhci1") => "USB 2.0 Controller (EHCI)".to_string(),
+                Some(m) => format!("USB Controller ({})", m),
+                None => "USB Controller".to_string(),
+            },
+            "scsi" => match self.model.as_deref() {
+                Some("virtio-scsi") => "VirtIO SCSI Controller".to_string(),
+                Some(m) => format!("SCSI Controller ({})", m),
+                None => "SCSI Controller".to_string(),
+            },
+            "virtio-serial" => "VirtIO Serial Controller".to_string(),
+            other => format!("{} Controller", other),
+        }
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        format!(
+            "type={}, index={}{}",
+            self.controller_type,
+            self.index,
+            self.model.as_deref().map(|m| format!(", model={}", m)).unwrap_or_default()
+        )
+    }
+
+    /// Returns true for system controllers that should not be shown in UI
+    pub fn is_system(&self) -> bool {
+        matches!(
+            self.controller_type.as_str(),
+            "pci" | "pcie-root" | "pcie-root-port" | "ide" | "sata" | "pcie-to-pci-bridge"
+        )
+    }
+}
+
+// --- Parallel Port Types ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelInfo {
+    pub port: u32,
+}
+
+impl ParallelInfo {
+    pub fn display_name(&self) -> String {
+        format!("Parallel Port {}", self.port)
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        format!("type=pty, port={}", self.port)
+    }
+}
+
+// --- Panic Device Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicModel {
+    Hyperv,
+    Isa,
+    Pvpanic,
+    None,
+}
+
+impl PanicModel {
+    pub const ALL: &'static [PanicModel] = &[
+        PanicModel::Hyperv,
+        PanicModel::Isa,
+        PanicModel::Pvpanic,
+        PanicModel::None,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PanicModel::Hyperv => "hyperv",
+            PanicModel::Isa => "isa",
+            PanicModel::Pvpanic => "pvpanic",
+            PanicModel::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "hyperv" => PanicModel::Hyperv,
+            "isa" => PanicModel::Isa,
+            "pvpanic" => PanicModel::Pvpanic,
+            _ => PanicModel::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            PanicModel::Hyperv => "Hyper-V (Windows guests)",
+            PanicModel::Isa => "ISA (legacy)",
+            PanicModel::Pvpanic => "PVPanic (Linux guests)",
+            PanicModel::None => "None (disabled)",
+        }
+    }
+}
+
+// --- USB Redirection Types ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbredirInfo {
+    pub index: u32,
+}
+
+impl UsbredirInfo {
+    pub fn display_name(&self) -> String {
+        format!("USB Redirect Channel {}", self.index)
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        "type=spicevmc, bus=usb".to_string()
+    }
+}
+
+// --- Smartcard Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartcardMode {
+    Passthrough,
+    Host,
+    None,
+}
+
+impl SmartcardMode {
+    pub const ALL: &'static [SmartcardMode] = &[
+        SmartcardMode::Passthrough,
+        SmartcardMode::Host,
+        SmartcardMode::None,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SmartcardMode::Passthrough => "passthrough",
+            SmartcardMode::Host => "host",
+            SmartcardMode::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "passthrough" => SmartcardMode::Passthrough,
+            "host" => SmartcardMode::Host,
+            _ => SmartcardMode::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SmartcardMode::Passthrough => "Passthrough (SPICE)",
+            SmartcardMode::Host => "Host (emulated)",
+            SmartcardMode::None => "None (disabled)",
+        }
+    }
+}
+
+// --- Memory Balloon Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemballoonModel {
+    Virtio,
+    None,
+}
+
+impl MemballoonModel {
+    pub const ALL: &'static [MemballoonModel] = &[MemballoonModel::Virtio, MemballoonModel::None];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemballoonModel::Virtio => "virtio",
+            MemballoonModel::None => "none",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "virtio" => MemballoonModel::Virtio,
+            _ => MemballoonModel::None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            MemballoonModel::Virtio => "VirtIO",
+            MemballoonModel::None => "None (disabled)",
+        }
+    }
+}
+
+// --- Channel Types ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInfo {
+    pub channel_type: String, // "spicevmc", "unix", "pty"
+    pub target_name: String,  // "com.redhat.spice.0", "org.qemu.guest_agent.0", etc.
+}
+
+impl ChannelInfo {
+    pub fn display_name(&self) -> String {
+        match self.target_name.as_str() {
+            "com.redhat.spice.0" => "SPICE Agent".to_string(),
+            "org.qemu.guest_agent.0" => "QEMU Guest Agent".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        format!("type={}, target=virtio", self.channel_type)
+    }
+}
+
 // --- Domain Details ---
 
 #[derive(Debug, Clone)]
@@ -1169,4 +1494,12 @@ pub struct DomainDetails {
     pub serials: Vec<SerialInfo>,
     pub rng: Option<RngBackend>,
     pub watchdog: Option<WatchdogInfo>,
+    pub inputs: Vec<InputInfo>,
+    pub channels: Vec<ChannelInfo>,
+    pub controllers: Vec<ControllerInfo>,
+    pub parallels: Vec<ParallelInfo>,
+    pub panic: Option<PanicModel>,
+    pub usbredirs: Vec<UsbredirInfo>,
+    pub smartcard: Option<SmartcardMode>,
+    pub memballoon: Option<MemballoonModel>,
 }

@@ -1890,7 +1890,9 @@ impl Window {
                 let host_cpu_count = backend::connection::get_host_info(&uri)
                     .map(|h| h.cpu_threads)
                     .unwrap_or(0);
-                Ok::<_, crate::error::AppError>((details, autostart, networks, is_running, host_cpu_count))
+                let pool_volumes = backend::storage::list_all_pool_volumes(&uri)
+                    .unwrap_or_default();
+                Ok::<_, crate::error::AppError>((details, autostart, networks, is_running, host_cpu_count, pool_volumes))
             }
         });
 
@@ -1899,7 +1901,7 @@ impl Window {
             let Some(win) = win.upgrade() else { return };
 
             match result {
-                Ok((details, autostart, networks, is_running, host_cpu_count)) => {
+                Ok((details, autostart, networks, is_running, host_cpu_count, pool_volumes)) => {
                     let win_ref = win.downgrade();
                     let uuid_clone = uuid.clone();
                     let uri = win.imp().connection_uri.borrow().clone();
@@ -1911,6 +1913,7 @@ impl Window {
                         is_running,
                         networks,
                         host_cpu_count,
+                        pool_volumes,
                         move |action| {
                             let Some(win) = win_ref.upgrade() else { return };
                             let uri = uri.clone();
@@ -2353,6 +2356,12 @@ impl Window {
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }
+            ConfigAction::ChangeDiskImage(target_dev, new_path) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::change_disk_image(&xml, &target_dev, &new_path)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
             ConfigAction::ApplyCpuTune(cpu_tune) => {
                 let xml = backend::domain::get_domain_xml(uri, uuid)?;
                 let xml = backend::domain_xml::modify_cputune(&xml, &cpu_tune)?;
@@ -2410,6 +2419,90 @@ impl Window {
             ConfigAction::ModifyWatchdog(model, action) => {
                 let xml = backend::domain::get_domain_xml(uri, uuid)?;
                 let xml = backend::domain_xml::modify_watchdog(&xml, model, action)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddInput(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_input_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveInput(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_input_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddChannel(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_channel_device(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveChannel(target_name) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_channel_device(&xml, &target_name)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddController(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_controller(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveController(info) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_controller(&xml, &info)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddParallel => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_parallel_device(&xml)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveParallel(port) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_parallel_device(&xml, port)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifyPanic(model) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_panic(&xml, model)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::AddUsbredir => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::add_usbredir(&xml)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::RemoveUsbredir(index) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::remove_usbredir(&xml, index)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifySmartcard(mode) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_smartcard(&xml, mode)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ModifyMemballoon(model) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::modify_memballoon(&xml, model)?;
+                backend::domain::update_domain_xml(uri, &xml)?;
+                Ok(())
+            }
+            ConfigAction::ChangeNetworkSource(mac, params) => {
+                let xml = backend::domain::get_domain_xml(uri, uuid)?;
+                let xml = backend::domain_xml::change_network_source(&xml, &mac, &params)?;
                 backend::domain::update_domain_xml(uri, &xml)?;
                 Ok(())
             }

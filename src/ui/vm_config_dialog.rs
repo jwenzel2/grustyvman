@@ -6,8 +6,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::types::{
-    BootDevice, ConfigAction, ConfigChanges, CpuMode, CpuTune, DomainDetails, FilesystemInfo,
-    FirmwareType, GraphicsType, SoundModel, TpmModel, VcpuPin, VideoModel, CPU_MODELS,
+    BootDevice, ChannelInfo, ConfigAction, ConfigChanges, ControllerInfo, CpuMode, CpuTune,
+    DomainDetails, FilesystemInfo, FirmwareType, GraphicsType, InputInfo, MemballoonModel,
+    PanicModel, SmartcardMode, SoundModel, TpmModel, VcpuPin, VideoModel, VolumeInfo, CPU_MODELS,
 };
 
 pub fn show_config_dialog(
@@ -17,6 +18,7 @@ pub fn show_config_dialog(
     is_running: bool,
     networks: Vec<String>,
     host_cpu_count: u32,
+    pool_volumes: Vec<(String, Vec<VolumeInfo>)>,
     on_action: impl Fn(ConfigAction) + Clone + 'static,
 ) {
     let window = adw::PreferencesWindow::new();
@@ -413,31 +415,45 @@ pub fn show_config_dialog(
             let target = disk.target_dev.clone();
             let window_ref = window.clone();
             let parent_ref = parent.clone();
+            let pool_volumes_cdrom = pool_volumes.clone();
             change_btn.connect_clicked(move |_| {
                 let on_action = on_action_change.clone();
                 let target = target.clone();
                 let wr = window_ref.clone();
-                let dialog = gtk::FileDialog::builder()
-                    .title("Select ISO Image")
-                    .build();
-                let filter = gtk::FileFilter::new();
-                filter.add_pattern("*.iso");
-                filter.add_pattern("*.ISO");
-                filter.set_name(Some("ISO Images"));
-                let filters = gio::ListStore::new::<gtk::FileFilter>();
-                filters.append(&filter);
-                dialog.set_filters(Some(&filters));
-                dialog.open(Some(&parent_ref), gtk::gio::Cancellable::NONE, move |result| {
-                    if let Ok(file) = result {
-                        if let Some(path) = file.path() {
-                            on_action(ConfigAction::InsertCdrom(
-                                target.clone(),
-                                path.to_string_lossy().to_string(),
-                            ));
-                            wr.close();
-                        }
-                    }
-                });
+                crate::ui::storage_volume_picker_dialog::show_storage_volume_picker(
+                    &parent_ref,
+                    &pool_volumes_cdrom,
+                    move |path| {
+                        on_action(ConfigAction::InsertCdrom(target.clone(), path));
+                        wr.close();
+                    },
+                );
+            });
+            btn_box.append(&change_btn);
+        }
+
+        if disk.device_type != "cdrom" {
+            // Change image button for regular disks
+            let change_btn = gtk::Button::from_icon_name("document-open-symbolic");
+            change_btn.add_css_class("flat");
+            change_btn.set_tooltip_text(Some("Change Image File"));
+            let on_action_change = on_action.clone();
+            let target = disk.target_dev.clone();
+            let window_ref = window.clone();
+            let parent_ref = parent.clone();
+            let pool_volumes_disk = pool_volumes.clone();
+            change_btn.connect_clicked(move |_| {
+                let on_action = on_action_change.clone();
+                let target = target.clone();
+                let wr = window_ref.clone();
+                crate::ui::storage_volume_picker_dialog::show_storage_volume_picker(
+                    &parent_ref,
+                    &pool_volumes_disk,
+                    move |path| {
+                        on_action(ConfigAction::ChangeDiskImage(target.clone(), path));
+                        wr.close();
+                    },
+                );
             });
             btn_box.append(&change_btn);
         }
@@ -495,15 +511,43 @@ pub fn show_config_dialog(
         let title = net.mac_address.clone().unwrap_or_else(|| "Unknown MAC".to_string());
         row.set_title(&title);
         let subtitle = format!(
-            "Network: {} | Model: {}",
-            net.source_network.as_deref().unwrap_or("N/A"),
+            "{} | Model: {}",
+            net.display_source(),
             net.model_type.as_deref().unwrap_or("N/A")
         );
         row.set_subtitle(&subtitle);
 
+        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        btn_box.set_valign(gtk::Align::Center);
+
+        // Change network source button
+        let change_src_btn = gtk::Button::from_icon_name("network-wired-symbolic");
+        change_src_btn.add_css_class("flat");
+        change_src_btn.set_tooltip_text(Some("Change Network Source"));
+        let on_action_src = on_action.clone();
+        let mac_src = net.mac_address.clone().unwrap_or_default();
+        let iface_type = net.interface_type.clone();
+        let networks_clone = networks.clone();
+        let parent_ref_net = parent.clone();
+        let window_ref_net = window.clone();
+        change_src_btn.connect_clicked(move |_| {
+            let on_action = on_action_src.clone();
+            let mac = mac_src.clone();
+            let wr = window_ref_net.clone();
+            crate::ui::change_network_source_dialog::show_change_network_source_dialog(
+                &parent_ref_net,
+                &networks_clone,
+                &iface_type,
+                move |params| {
+                    on_action(ConfigAction::ChangeNetworkSource(mac.clone(), params));
+                    wr.close();
+                },
+            );
+        });
+        btn_box.append(&change_src_btn);
+
         let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
         remove_btn.add_css_class("flat");
-        remove_btn.set_valign(gtk::Align::Center);
         let on_action_net = on_action.clone();
         let mac = net.mac_address.clone().unwrap_or_default();
         let window_ref = window.clone();
@@ -511,7 +555,9 @@ pub fn show_config_dialog(
             on_action_net(ConfigAction::RemoveNetwork(mac.clone()));
             window_ref.close();
         });
-        row.add_suffix(&remove_btn);
+        btn_box.append(&remove_btn);
+
+        row.add_suffix(&btn_box);
         row.set_activatable(false);
         networks_group.add(&row);
     }
@@ -535,6 +581,79 @@ pub fn show_config_dialog(
     });
 
     devices_page.add(&networks_group);
+
+    // Input Devices group
+    let input_group = adw::PreferencesGroup::new();
+    input_group.set_title("Input Devices");
+
+    let add_input_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_input_btn.set_tooltip_text(Some("Add Input Device"));
+    add_input_btn.add_css_class("flat");
+    input_group.set_header_suffix(Some(&add_input_btn));
+
+    for input in &details.inputs {
+        let row = adw::ActionRow::new();
+        row.set_title(&input.display_name());
+        row.set_subtitle(&input.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_inp = on_action.clone();
+        let inp_clone = input.clone();
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_inp(ConfigAction::RemoveInput(inp_clone.clone()));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        input_group.add(&row);
+    }
+
+    let input_add_group = adw::PreferencesGroup::new();
+
+    let input_type_labels = ["USB Tablet", "USB Mouse", "USB Keyboard", "VirtIO Mouse", "VirtIO Keyboard"];
+    let input_type_list = gtk::StringList::new(&input_type_labels);
+    let input_type_row = adw::ComboRow::new();
+    input_type_row.set_title("Device Type");
+    input_type_row.set_model(Some(&input_type_list));
+    input_add_group.add(&input_type_row);
+
+    let input_add_apply_btn = gtk::Button::with_label("Add Input Device");
+    input_add_apply_btn.add_css_class("suggested-action");
+    input_add_apply_btn.add_css_class("pill");
+    input_add_apply_btn.set_halign(gtk::Align::Center);
+    input_add_apply_btn.set_margin_top(8);
+
+    let on_action_inp_add = on_action.clone();
+    let window_ref_inp = window.clone();
+    input_add_apply_btn.connect_clicked(move |_| {
+        let idx = input_type_row.selected() as usize;
+        let (input_type, bus) = match idx {
+            0 => ("tablet", "usb"),
+            1 => ("mouse", "usb"),
+            2 => ("keyboard", "usb"),
+            3 => ("mouse", "virtio"),
+            4 => ("keyboard", "virtio"),
+            _ => ("tablet", "usb"),
+        };
+        on_action_inp_add(ConfigAction::AddInput(InputInfo {
+            input_type: input_type.to_string(),
+            bus: bus.to_string(),
+        }));
+        window_ref_inp.close();
+    });
+    input_add_group.add(&input_add_apply_btn);
+
+    input_add_group.set_visible(false);
+    let input_add_group_ref = input_add_group.clone();
+    add_input_btn.connect_clicked(move |_| {
+        input_add_group_ref.set_visible(!input_add_group_ref.is_visible());
+    });
+
+    devices_page.add(&input_group);
+    devices_page.add(&input_add_group);
 
     // TPM group
     let tpm_group = adw::PreferencesGroup::new();
@@ -700,6 +819,100 @@ pub fn show_config_dialog(
     });
 
     devices_page.add(&hostdev_group);
+
+    // --- Channels group ---
+    let channels_group = adw::PreferencesGroup::new();
+    channels_group.set_title("Channels");
+
+    let add_channel_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_channel_btn.set_tooltip_text(Some("Add Channel"));
+    add_channel_btn.add_css_class("flat");
+    channels_group.set_header_suffix(Some(&add_channel_btn));
+
+    for ch in &details.channels {
+        let row = adw::ActionRow::new();
+        row.set_title(&ch.display_name());
+        row.set_subtitle(&ch.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_ch = on_action.clone();
+        let target_name = ch.target_name.clone();
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_ch(ConfigAction::RemoveChannel(target_name.clone()));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        channels_group.add(&row);
+    }
+
+    let channel_add_group = adw::PreferencesGroup::new();
+
+    let channel_preset_labels = [
+        "SPICE Agent (clipboard/display integration)",
+        "QEMU Guest Agent",
+        "Custom VirtIO Serial",
+    ];
+    let channel_preset_list = gtk::StringList::new(&channel_preset_labels);
+    let channel_preset_row = adw::ComboRow::new();
+    channel_preset_row.set_title("Channel Type");
+    channel_preset_row.set_model(Some(&channel_preset_list));
+    channel_add_group.add(&channel_preset_row);
+
+    let channel_name_entry = adw::EntryRow::new();
+    channel_name_entry.set_title("Custom Target Name");
+    channel_name_entry.set_visible(false);
+    channel_add_group.add(&channel_name_entry);
+
+    let channel_name_ref = channel_name_entry.clone();
+    channel_preset_row.connect_selected_notify(move |row| {
+        channel_name_ref.set_visible(row.selected() == 2);
+    });
+
+    let channel_add_apply_btn = gtk::Button::with_label("Add Channel");
+    channel_add_apply_btn.add_css_class("suggested-action");
+    channel_add_apply_btn.add_css_class("pill");
+    channel_add_apply_btn.set_halign(gtk::Align::Center);
+    channel_add_apply_btn.set_margin_top(8);
+
+    let on_action_ch_add = on_action.clone();
+    let window_ref_ch = window.clone();
+    channel_add_apply_btn.connect_clicked(move |_| {
+        let idx = channel_preset_row.selected() as usize;
+        let info = match idx {
+            0 => ChannelInfo {
+                channel_type: "spicevmc".to_string(),
+                target_name: "com.redhat.spice.0".to_string(),
+            },
+            1 => ChannelInfo {
+                channel_type: "unix".to_string(),
+                target_name: "org.qemu.guest_agent.0".to_string(),
+            },
+            _ => {
+                let name = channel_name_entry.text().trim().to_string();
+                if name.is_empty() { return; }
+                ChannelInfo {
+                    channel_type: "pty".to_string(),
+                    target_name: name,
+                }
+            }
+        };
+        on_action_ch_add(ConfigAction::AddChannel(info));
+        window_ref_ch.close();
+    });
+    channel_add_group.add(&channel_add_apply_btn);
+
+    channel_add_group.set_visible(false);
+    let channel_add_group_ref = channel_add_group.clone();
+    add_channel_btn.connect_clicked(move |_| {
+        channel_add_group_ref.set_visible(!channel_add_group_ref.is_visible());
+    });
+
+    devices_page.add(&channels_group);
+    devices_page.add(&channel_add_group);
 
     // --- Serial / Console Ports group ---
     let serial_group = adw::PreferencesGroup::new();
@@ -869,6 +1082,259 @@ pub fn show_config_dialog(
     wd_group.add(&wd_apply_btn);
 
     devices_page.add(&wd_group);
+
+    // --- Controllers group ---
+    let controllers_group = adw::PreferencesGroup::new();
+    controllers_group.set_title("Controllers");
+
+    let add_controller_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_controller_btn.set_tooltip_text(Some("Add Controller"));
+    add_controller_btn.add_css_class("flat");
+    controllers_group.set_header_suffix(Some(&add_controller_btn));
+
+    for ctrl in details.controllers.iter().filter(|c| !c.is_system()) {
+        let row = adw::ActionRow::new();
+        row.set_title(&ctrl.display_name());
+        row.set_subtitle(&ctrl.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_ctrl = on_action.clone();
+        let ctrl_clone = ctrl.clone();
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_ctrl(ConfigAction::RemoveController(ctrl_clone.clone()));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        controllers_group.add(&row);
+    }
+
+    let ctrl_add_group = adw::PreferencesGroup::new();
+
+    let ctrl_preset_labels = ["USB 3.0 (xHCI)", "VirtIO SCSI"];
+    let ctrl_preset_list = gtk::StringList::new(&ctrl_preset_labels);
+    let ctrl_preset_row = adw::ComboRow::new();
+    ctrl_preset_row.set_title("Controller Type");
+    ctrl_preset_row.set_model(Some(&ctrl_preset_list));
+    ctrl_add_group.add(&ctrl_preset_row);
+
+    let ctrl_add_apply_btn = gtk::Button::with_label("Add Controller");
+    ctrl_add_apply_btn.add_css_class("suggested-action");
+    ctrl_add_apply_btn.add_css_class("pill");
+    ctrl_add_apply_btn.set_halign(gtk::Align::Center);
+    ctrl_add_apply_btn.set_margin_top(8);
+    let on_action_ctrl_add = on_action.clone();
+    let window_ref_ctrl = window.clone();
+    ctrl_add_apply_btn.connect_clicked(move |_| {
+        let info = match ctrl_preset_row.selected() {
+            0 => ControllerInfo {
+                controller_type: "usb".to_string(),
+                model: Some("qemu-xhci".to_string()),
+                index: 0,
+            },
+            _ => ControllerInfo {
+                controller_type: "scsi".to_string(),
+                model: Some("virtio-scsi".to_string()),
+                index: 0,
+            },
+        };
+        on_action_ctrl_add(ConfigAction::AddController(info));
+        window_ref_ctrl.close();
+    });
+    ctrl_add_group.add(&ctrl_add_apply_btn);
+
+    ctrl_add_group.set_visible(false);
+    let ctrl_add_group_ref = ctrl_add_group.clone();
+    add_controller_btn.connect_clicked(move |_| {
+        ctrl_add_group_ref.set_visible(!ctrl_add_group_ref.is_visible());
+    });
+
+    devices_page.add(&controllers_group);
+    devices_page.add(&ctrl_add_group);
+
+    // --- Parallel Ports group ---
+    let parallel_group = adw::PreferencesGroup::new();
+    parallel_group.set_title("Parallel Ports");
+
+    let add_parallel_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_parallel_btn.set_tooltip_text(Some("Add Parallel Port"));
+    add_parallel_btn.add_css_class("flat");
+    parallel_group.set_header_suffix(Some(&add_parallel_btn));
+
+    for par in &details.parallels {
+        let row = adw::ActionRow::new();
+        row.set_title(&par.display_name());
+        row.set_subtitle(&par.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_par = on_action.clone();
+        let port = par.port;
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_par(ConfigAction::RemoveParallel(port));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        parallel_group.add(&row);
+    }
+
+    let on_action_par_add = on_action.clone();
+    let window_ref_par = window.clone();
+    add_parallel_btn.connect_clicked(move |_| {
+        on_action_par_add(ConfigAction::AddParallel);
+        window_ref_par.close();
+    });
+
+    devices_page.add(&parallel_group);
+
+    // --- Panic Device group ---
+    let panic_group = adw::PreferencesGroup::new();
+    panic_group.set_title("Panic Device");
+
+    let panic_labels: Vec<&str> = PanicModel::ALL.iter().map(|m| m.label()).collect();
+    let panic_list = gtk::StringList::new(&panic_labels);
+    let panic_row = adw::ComboRow::new();
+    panic_row.set_title("Model");
+    panic_row.set_model(Some(&panic_list));
+    let current_panic_idx = details
+        .panic
+        .and_then(|p| PanicModel::ALL.iter().position(|m| *m == p))
+        .unwrap_or(PanicModel::ALL.len() - 1);
+    panic_row.set_selected(current_panic_idx as u32);
+    panic_group.add(&panic_row);
+
+    let panic_apply_btn = gtk::Button::with_label("Apply Panic Device");
+    panic_apply_btn.add_css_class("suggested-action");
+    panic_apply_btn.add_css_class("pill");
+    panic_apply_btn.set_halign(gtk::Align::Center);
+    panic_apply_btn.set_margin_top(8);
+    let on_action_panic = on_action.clone();
+    let window_ref_panic = window.clone();
+    panic_apply_btn.connect_clicked(move |_| {
+        let model = PanicModel::ALL
+            .get(panic_row.selected() as usize)
+            .copied()
+            .unwrap_or(PanicModel::None);
+        on_action_panic(ConfigAction::ModifyPanic(model));
+        window_ref_panic.close();
+    });
+    panic_group.add(&panic_apply_btn);
+
+    devices_page.add(&panic_group);
+
+    // --- USB Redirection group ---
+    let usbredir_group = adw::PreferencesGroup::new();
+    usbredir_group.set_title("USB Redirection (SPICE)");
+
+    let add_usbredir_btn = gtk::Button::from_icon_name("list-add-symbolic");
+    add_usbredir_btn.set_tooltip_text(Some("Add USB Redirect Channel"));
+    add_usbredir_btn.add_css_class("flat");
+    usbredir_group.set_header_suffix(Some(&add_usbredir_btn));
+
+    for redir in &details.usbredirs {
+        let row = adw::ActionRow::new();
+        row.set_title(&redir.display_name());
+        row.set_subtitle(&redir.display_subtitle());
+
+        let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_btn.add_css_class("flat");
+        remove_btn.set_valign(gtk::Align::Center);
+        let on_action_redir = on_action.clone();
+        let idx = redir.index;
+        let window_ref = window.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_action_redir(ConfigAction::RemoveUsbredir(idx));
+            window_ref.close();
+        });
+        row.add_suffix(&remove_btn);
+        row.set_activatable(false);
+        usbredir_group.add(&row);
+    }
+
+    let on_action_usbredir_add = on_action.clone();
+    let window_ref_usbredir = window.clone();
+    add_usbredir_btn.connect_clicked(move |_| {
+        on_action_usbredir_add(ConfigAction::AddUsbredir);
+        window_ref_usbredir.close();
+    });
+
+    devices_page.add(&usbredir_group);
+
+    // --- Smartcard group ---
+    let smartcard_group = adw::PreferencesGroup::new();
+    smartcard_group.set_title("Smartcard");
+
+    let sc_labels: Vec<&str> = SmartcardMode::ALL.iter().map(|m| m.label()).collect();
+    let sc_list = gtk::StringList::new(&sc_labels);
+    let sc_row = adw::ComboRow::new();
+    sc_row.set_title("Mode");
+    sc_row.set_model(Some(&sc_list));
+    let current_sc_idx = details
+        .smartcard
+        .and_then(|m| SmartcardMode::ALL.iter().position(|s| *s == m))
+        .unwrap_or(SmartcardMode::ALL.len() - 1);
+    sc_row.set_selected(current_sc_idx as u32);
+    smartcard_group.add(&sc_row);
+
+    let sc_apply_btn = gtk::Button::with_label("Apply Smartcard");
+    sc_apply_btn.add_css_class("suggested-action");
+    sc_apply_btn.add_css_class("pill");
+    sc_apply_btn.set_halign(gtk::Align::Center);
+    sc_apply_btn.set_margin_top(8);
+    let on_action_sc = on_action.clone();
+    let window_ref_sc = window.clone();
+    sc_apply_btn.connect_clicked(move |_| {
+        let mode = SmartcardMode::ALL
+            .get(sc_row.selected() as usize)
+            .copied()
+            .unwrap_or(SmartcardMode::None);
+        on_action_sc(ConfigAction::ModifySmartcard(mode));
+        window_ref_sc.close();
+    });
+    smartcard_group.add(&sc_apply_btn);
+
+    devices_page.add(&smartcard_group);
+
+    // --- Memory Balloon group ---
+    let balloon_group = adw::PreferencesGroup::new();
+    balloon_group.set_title("Memory Balloon");
+
+    let balloon_labels: Vec<&str> = MemballoonModel::ALL.iter().map(|m| m.label()).collect();
+    let balloon_list = gtk::StringList::new(&balloon_labels);
+    let balloon_row = adw::ComboRow::new();
+    balloon_row.set_title("Model");
+    balloon_row.set_model(Some(&balloon_list));
+    let current_balloon_idx = details
+        .memballoon
+        .and_then(|m| MemballoonModel::ALL.iter().position(|b| *b == m))
+        .unwrap_or(0); // default to VirtIO
+    balloon_row.set_selected(current_balloon_idx as u32);
+    balloon_group.add(&balloon_row);
+
+    let balloon_apply_btn = gtk::Button::with_label("Apply Memory Balloon");
+    balloon_apply_btn.add_css_class("suggested-action");
+    balloon_apply_btn.add_css_class("pill");
+    balloon_apply_btn.set_halign(gtk::Align::Center);
+    balloon_apply_btn.set_margin_top(8);
+    let on_action_balloon = on_action.clone();
+    let window_ref_balloon = window.clone();
+    balloon_apply_btn.connect_clicked(move |_| {
+        let model = MemballoonModel::ALL
+            .get(balloon_row.selected() as usize)
+            .copied()
+            .unwrap_or(MemballoonModel::Virtio);
+        on_action_balloon(ConfigAction::ModifyMemballoon(model));
+        window_ref_balloon.close();
+    });
+    balloon_group.add(&balloon_apply_btn);
+
+    devices_page.add(&balloon_group);
 
     window.add(&devices_page);
 

@@ -1,4 +1,5 @@
 pub mod add_disk_dialog;
+pub mod change_network_source_dialog;
 pub mod add_hostdev_dialog;
 pub mod add_network_dialog;
 pub mod clone_vm_dialog;
@@ -13,6 +14,7 @@ pub mod network_row;
 pub mod perf_graph;
 pub mod pool_details_view;
 pub mod pool_row;
+pub mod storage_volume_picker_dialog;
 pub mod vm_config_dialog;
 pub mod vm_creation_dialog;
 pub mod vm_details_view;

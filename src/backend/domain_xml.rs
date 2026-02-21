@@ -1,8 +1,10 @@
 use crate::backend::types::{
-    BootDevice, CpuMode, CpuTune, DiskInfo, DomainDetails, FilesystemInfo, FirmwareType,
-    GraphicsInfo, GraphicsType, HostdevInfo, NetworkInfo, NewDiskParams, NewNetworkParams,
-    RngBackend, SerialInfo, SoundInfo, SoundModel, TpmInfo, TpmModel, VcpuPin, VideoInfo,
-    VideoModel, WatchdogAction, WatchdogInfo, WatchdogModel,
+    BootDevice, ChangeNetworkSourceParams, ChannelInfo, ControllerInfo, CpuMode, CpuTune, DiskInfo,
+    DomainDetails, FilesystemInfo, FirmwareType, GraphicsInfo, GraphicsType, HostdevInfo,
+    InputInfo, MemballoonModel, NetworkInfo, NetworkSourceType, NewDiskParams, NewNetworkParams,
+    PanicModel, ParallelInfo, RngBackend, SerialInfo, SmartcardMode, SoundInfo, SoundModel,
+    TpmInfo, TpmModel, UsbredirInfo, VcpuPin, VideoInfo, VideoModel, WatchdogAction, WatchdogInfo,
+    WatchdogModel,
 };
 use crate::error::AppError;
 use quick_xml::events::{BytesStart, Event};
@@ -197,6 +199,14 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         serials: Vec::new(),
         rng: None,
         watchdog: None,
+        inputs: Vec::new(),
+        channels: Vec::new(),
+        controllers: Vec::new(),
+        parallels: Vec::new(),
+        panic: None,
+        usbredirs: Vec::new(),
+        smartcard: None,
+        memballoon: None,
     };
 
     #[derive(Debug)]
@@ -223,7 +233,10 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     #[derive(Debug, Default)]
     struct InterfaceBuilder {
         mac_address: Option<String>,
+        interface_type: String,
         source_network: Option<String>,
+        source_bridge: Option<String>,
+        source_dev: Option<String>,
         model_type: Option<String>,
     }
 
@@ -267,6 +280,15 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     // RNG / watchdog flags
     let mut in_rng = false;
     let mut os_arch = String::new();
+    // Channel parsing state
+    let mut in_channel = false;
+    let mut channel_type = String::new();
+    let mut channel_target_name = String::new();
+    // Parallel parsing state
+    let mut in_parallel = false;
+    let mut parallel_port: u32 = 0;
+    // Redirdev count
+    let mut redirdev_count: u32 = 0;
 
     loop {
         match reader.read_event() {
@@ -394,10 +416,12 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                                 }
                                 Context::Interface(ref mut ib) => {
                                     for attr in e.attributes().flatten() {
-                                        if attr.key.as_ref() == b"network" {
-                                            ib.source_network = Some(
-                                                String::from_utf8_lossy(&attr.value).to_string(),
-                                            );
+                                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                                        match attr.key.as_ref() {
+                                            b"network" => ib.source_network = Some(val),
+                                            b"bridge" => ib.source_bridge = Some(val),
+                                            b"dev" => ib.source_dev = Some(val),
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -431,7 +455,14 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                         }
                     }
                     "interface" if in_devices => {
-                        context = Context::Interface(InterfaceBuilder::default());
+                        let mut ib = InterfaceBuilder::default();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"type" {
+                                ib.interface_type =
+                                    String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                        context = Context::Interface(ib);
                     }
                     "mac" if matches!(context, Context::Interface(_)) => {
                         if let Context::Interface(ref mut ib) = context {
@@ -621,6 +652,122 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                             details.watchdog = Some(WatchdogInfo { model, action });
                         }
                     }
+                    "input" if in_devices => {
+                        let mut input_type = String::new();
+                        let mut bus = String::new();
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"type" => {
+                                    input_type =
+                                        String::from_utf8_lossy(&attr.value).to_string();
+                                }
+                                b"bus" => {
+                                    bus = String::from_utf8_lossy(&attr.value).to_string();
+                                }
+                                _ => {}
+                            }
+                        }
+                        if !input_type.is_empty() {
+                            details.inputs.push(InputInfo { input_type, bus });
+                        }
+                    }
+                    "channel" if in_devices => {
+                        in_channel = true;
+                        channel_type.clear();
+                        channel_target_name.clear();
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"type" {
+                                channel_type =
+                                    String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    "target" if in_channel => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"name" {
+                                channel_target_name =
+                                    String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    "controller" if in_devices => {
+                        let mut ctype = String::new();
+                        let mut cmodel: Option<String> = None;
+                        let mut cidx: u32 = 0;
+                        for attr in e.attributes().flatten() {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            match attr.key.as_ref() {
+                                b"type" => ctype = val,
+                                b"model" => cmodel = Some(val),
+                                b"index" => cidx = val.parse().unwrap_or(0),
+                                _ => {}
+                            }
+                        }
+                        if !ctype.is_empty() {
+                            let info = ControllerInfo {
+                                controller_type: ctype,
+                                model: cmodel,
+                                index: cidx,
+                            };
+                            if !info.is_system() {
+                                details.controllers.push(info);
+                            }
+                        }
+                    }
+                    "parallel" if in_devices => {
+                        in_parallel = true;
+                        parallel_port = 0;
+                    }
+                    "target" if in_parallel => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"port" {
+                                parallel_port =
+                                    String::from_utf8_lossy(&attr.value).parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    "panic" if in_devices => {
+                        let mut model = PanicModel::None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"model" {
+                                model = PanicModel::from_str(
+                                    &String::from_utf8_lossy(&attr.value),
+                                );
+                            }
+                        }
+                        if model != PanicModel::None {
+                            details.panic = Some(model);
+                        }
+                    }
+                    "redirdev" if in_devices => {
+                        let idx = redirdev_count;
+                        redirdev_count += 1;
+                        details.usbredirs.push(UsbredirInfo { index: idx });
+                    }
+                    "smartcard" if in_devices => {
+                        let mut mode = SmartcardMode::None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"mode" {
+                                mode = SmartcardMode::from_str(
+                                    &String::from_utf8_lossy(&attr.value),
+                                );
+                            }
+                        }
+                        if mode != SmartcardMode::None {
+                            details.smartcard = Some(mode);
+                        }
+                    }
+                    "memballoon" if in_devices => {
+                        let mut model = MemballoonModel::None;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"model" {
+                                model = MemballoonModel::from_str(
+                                    &String::from_utf8_lossy(&attr.value),
+                                );
+                            }
+                        }
+                        details.memballoon = Some(model);
+                    }
                     "hostdev" if in_devices => {
                         in_hostdev = true;
                         hostdev_builder = HostdevBuilder::default();
@@ -768,7 +915,10 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                         {
                             details.networks.push(NetworkInfo {
                                 mac_address: ib.mac_address,
+                                interface_type: ib.interface_type,
                                 source_network: ib.source_network,
+                                source_bridge: ib.source_bridge,
+                                source_dev: ib.source_dev,
                                 model_type: ib.model_type,
                             });
                         }
@@ -789,6 +939,23 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
                     }
                     "rng" => {
                         in_rng = false;
+                    }
+                    "parallel" => {
+                        if in_parallel {
+                            details.parallels.push(ParallelInfo { port: parallel_port });
+                            in_parallel = false;
+                        }
+                    }
+                    "channel" => {
+                        if in_channel && !channel_target_name.is_empty() {
+                            details.channels.push(ChannelInfo {
+                                channel_type: channel_type.clone(),
+                                target_name: channel_target_name.clone(),
+                            });
+                        }
+                        in_channel = false;
+                        channel_type.clear();
+                        channel_target_name.clear();
                     }
                     "hostdev" => {
                         if in_hostdev {
@@ -2016,6 +2183,131 @@ pub fn change_cdrom_media(
     Ok(result)
 }
 
+pub fn change_disk_image(
+    xml: &str,
+    target_dev: &str,
+    new_path: &str,
+) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut disk_buffer = String::new();
+    let mut disk_depth = 0u32;
+    let mut in_disk = false;
+    let mut is_cdrom = false;
+    let mut found_target = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_disk {
+                    disk_depth += 1;
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                if dev == target_dev {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push('>');
+                    continue;
+                }
+
+                if name == "disk" {
+                    in_disk = true;
+                    disk_depth = 1;
+                    disk_buffer.clear();
+                    is_cdrom = false;
+                    found_target = false;
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"device" {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            if val == "cdrom" {
+                                is_cdrom = true;
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push('>');
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_disk {
+                    disk_depth -= 1;
+                    disk_buffer.push_str(&format!("</{name}>"));
+                    if disk_depth == 0 {
+                        in_disk = false;
+                        if !is_cdrom && found_target {
+                            result.push_str(&replace_source_in_disk(&disk_buffer, new_path));
+                        } else {
+                            result.push_str(&disk_buffer);
+                        }
+                        disk_buffer.clear();
+                    }
+                    continue;
+                }
+
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_disk {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if name == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"dev" {
+                                let dev = String::from_utf8_lossy(&attr.value).to_string();
+                                if dev == target_dev {
+                                    found_target = true;
+                                }
+                            }
+                        }
+                    }
+                    disk_buffer.push('<');
+                    write_element(&mut disk_buffer, e);
+                    disk_buffer.push_str("/>");
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_disk {
+                    disk_buffer.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
 fn replace_source_in_disk(disk_xml: &str, iso_path: &str) -> String {
     let mut result = String::new();
     let mut reader = Reader::from_str(disk_xml);
@@ -3129,6 +3421,216 @@ pub fn modify_rng(xml: &str, backend: Option<RngBackend>) -> Result<String, AppE
     Ok(result)
 }
 
+// ---- Input Devices ----
+
+pub fn add_input_device(xml: &str, info: &InputInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let input_xml = format!(
+        r#"<input type="{}" bus="{}"/>"#,
+        info.input_type, info.bus
+    );
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&input_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_input_device(xml: &str, info: &InputInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut removed = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if !removed && ename == "input" {
+                    let mut itype = String::new();
+                    let mut ibus = String::new();
+                    for attr in e.attributes().flatten() {
+                        match attr.key.as_ref() {
+                            b"type" => itype = String::from_utf8_lossy(&attr.value).to_string(),
+                            b"bus" => ibus = String::from_utf8_lossy(&attr.value).to_string(),
+                            _ => {}
+                        }
+                    }
+                    if itype == info.input_type && ibus == info.bus {
+                        removed = true;
+                        continue;
+                    }
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Start(ref e)) => {
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Channels ----
+
+pub fn add_channel_device(xml: &str, info: &ChannelInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let channel_xml = format!(
+        r#"<channel type="{}"><target type="virtio" name="{}"/></channel>"#,
+        info.channel_type, info.target_name
+    );
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&channel_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_channel_device(xml: &str, target_name: &str) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut buf = String::new();
+    let mut depth = 0u32;
+    let mut in_channel = false;
+    let mut is_match = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_channel {
+                    depth += 1;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                if ename == "channel" {
+                    in_channel = true;
+                    depth = 1;
+                    buf.clear();
+                    is_match = false;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_channel {
+                    if ename == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"name" {
+                                let val = String::from_utf8_lossy(&attr.value).to_string();
+                                if val == target_name {
+                                    is_match = true;
+                                }
+                            }
+                        }
+                    }
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push_str("/>");
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_channel {
+                    depth -= 1;
+                    buf.push_str(&format!("</{ename}>"));
+                    if depth == 0 {
+                        in_channel = false;
+                        if !is_match {
+                            result.push_str(&buf);
+                        }
+                        buf.clear();
+                    }
+                    continue;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
 // ---- Watchdog ----
 
 pub fn modify_watchdog(
@@ -3193,4 +3695,862 @@ pub fn modify_watchdog(
     }
 
     Ok(result)
+}
+
+// ---- Controllers ----
+
+pub fn add_controller(xml: &str, info: &ControllerInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let model_attr = info
+        .model
+        .as_deref()
+        .map(|m| format!(r#" model="{}""#, m))
+        .unwrap_or_default();
+    let ctrl_xml = format!(
+        r#"<controller type="{}" index="{}"{}/>"#,
+        info.controller_type, info.index, model_attr
+    );
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&ctrl_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_controller(xml: &str, info: &ControllerInfo) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut buf = String::new();
+    let mut depth = 0u32;
+    let mut in_ctrl = false;
+    let mut is_match = false;
+    let mut removed_one = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if !removed_one && ename == "controller" {
+                    let mut ctype = String::new();
+                    let mut cmodel: Option<String> = None;
+                    let mut cidx: u32 = 0;
+                    for attr in e.attributes().flatten() {
+                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                        match attr.key.as_ref() {
+                            b"type" => ctype = val,
+                            b"model" => cmodel = Some(val),
+                            b"index" => cidx = val.parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    if ctype == info.controller_type
+                        && cmodel == info.model
+                        && cidx == info.index
+                    {
+                        removed_one = true;
+                        continue;
+                    }
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_ctrl {
+                    depth += 1;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                if !removed_one && ename == "controller" {
+                    in_ctrl = true;
+                    depth = 1;
+                    buf.clear();
+                    is_match = false;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    let mut ctype = String::new();
+                    let mut cmodel: Option<String> = None;
+                    let mut cidx: u32 = 0;
+                    for attr in e.attributes().flatten() {
+                        let val = String::from_utf8_lossy(&attr.value).to_string();
+                        match attr.key.as_ref() {
+                            b"type" => ctype = val,
+                            b"model" => cmodel = Some(val),
+                            b"index" => cidx = val.parse().unwrap_or(0),
+                            _ => {}
+                        }
+                    }
+                    if ctype == info.controller_type
+                        && cmodel == info.model
+                        && cidx == info.index
+                    {
+                        is_match = true;
+                    }
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_ctrl {
+                    depth -= 1;
+                    buf.push_str(&format!("</{ename}>"));
+                    if depth == 0 {
+                        in_ctrl = false;
+                        if !is_match {
+                            result.push_str(&buf);
+                        } else {
+                            removed_one = true;
+                        }
+                        buf.clear();
+                    }
+                    continue;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_ctrl {
+                    buf.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Parallel Ports ----
+
+pub fn add_parallel_device(xml: &str) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut port_count: u32 = 0;
+    {
+        let mut scan = Reader::from_str(xml);
+        scan.config_mut().trim_text(true);
+        loop {
+            match scan.read_event() {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    if String::from_utf8_lossy(e.name().as_ref()) == "parallel" {
+                        port_count += 1;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+
+    let parallel_xml = format!(
+        r#"<parallel type="pty"><target type="isa-parallel" port="{}"/></parallel>"#,
+        port_count
+    );
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(&parallel_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_parallel_device(xml: &str, port: u32) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut buf = String::new();
+    let mut depth = 0u32;
+    let mut in_parallel = false;
+    let mut is_match = false;
+    let mut removed_one = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_parallel {
+                    depth += 1;
+                    if ename == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"port" {
+                                let p: u32 =
+                                    String::from_utf8_lossy(&attr.value).parse().unwrap_or(u32::MAX);
+                                if p == port {
+                                    is_match = true;
+                                }
+                            }
+                        }
+                    }
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                if !removed_one && ename == "parallel" {
+                    in_parallel = true;
+                    depth = 1;
+                    buf.clear();
+                    is_match = false;
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push('>');
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_parallel {
+                    let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if ename == "target" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"port" {
+                                let p: u32 =
+                                    String::from_utf8_lossy(&attr.value).parse().unwrap_or(u32::MAX);
+                                if p == port {
+                                    is_match = true;
+                                }
+                            }
+                        }
+                    }
+                    buf.push('<');
+                    write_element(&mut buf, e);
+                    buf.push_str("/>");
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if in_parallel {
+                    depth -= 1;
+                    buf.push_str(&format!("</{ename}>"));
+                    if depth == 0 {
+                        in_parallel = false;
+                        if !is_match {
+                            result.push_str(&buf);
+                        } else {
+                            removed_one = true;
+                        }
+                        buf.clear();
+                    }
+                    continue;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_parallel {
+                    buf.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Panic Device ----
+
+pub fn modify_panic(xml: &str, model: PanicModel) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match ename.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "panic" if in_devices => {
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "panic" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "devices" {
+                    if model != PanicModel::None {
+                        result.push_str(&format!(r#"<panic model="{}"/>"#, model.as_str()));
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- USB Redirection ----
+
+pub fn add_usbredir(xml: &str) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let redirdev_xml = r#"<redirdev bus="usb" type="spicevmc"/>"#;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "devices" {
+                    result.push_str(redirdev_xml);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+pub fn remove_usbredir(xml: &str, index: u32) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut seen_count: u32 = 0;
+    let mut removed = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if !removed && ename == "redirdev" {
+                    if seen_count == index {
+                        removed = true;
+                        seen_count += 1;
+                        continue;
+                    }
+                    seen_count += 1;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if !removed && ename == "redirdev" {
+                    if seen_count == index {
+                        removed = true;
+                        seen_count += 1;
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    seen_count += 1;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Smartcard ----
+
+pub fn modify_smartcard(xml: &str, mode: SmartcardMode) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match ename.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "smartcard" if in_devices => {
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "smartcard" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "devices" {
+                    match mode {
+                        SmartcardMode::Passthrough => {
+                            result.push_str(r#"<smartcard mode="passthrough" type="spicevmc"/>"#);
+                        }
+                        SmartcardMode::Host => {
+                            result.push_str(r#"<smartcard mode="host"/>"#);
+                        }
+                        SmartcardMode::None => {}
+                    }
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Memory Balloon ----
+
+pub fn modify_memballoon(xml: &str, model: MemballoonModel) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut in_devices = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match ename.as_str() {
+                    "devices" => {
+                        in_devices = true;
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                    "memballoon" if in_devices => {
+                        let mut depth = 1u32;
+                        loop {
+                            match reader.read_event() {
+                                Ok(Event::Start(_)) => depth += 1,
+                                Ok(Event::End(_)) => {
+                                    depth -= 1;
+                                    if depth == 0 { break; }
+                                }
+                                Ok(Event::Eof) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        result.push('<');
+                        write_element(&mut result, e);
+                        result.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "memballoon" && in_devices {
+                    continue;
+                }
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::End(ref e)) => {
+                let ename = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if ename == "devices" {
+                    result.push_str(&format!(
+                        r#"<memballoon model="{}"/>"#,
+                        model.as_str()
+                    ));
+                    in_devices = false;
+                }
+                result.push_str(&format!("</{ename}>"));
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+                if matches!(event, Event::Eof) { break; }
+            }
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+        }
+    }
+
+    Ok(result)
+}
+
+// ---- Change Network Source ----
+
+pub fn change_network_source(
+    xml: &str,
+    mac_address: &str,
+    params: &ChangeNetworkSourceParams,
+) -> Result<String, AppError> {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut iface_buffer = String::new();
+    let mut iface_depth = 0u32;
+    let mut in_iface = false;
+    let mut found_mac = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_iface {
+                    iface_depth += 1;
+                    iface_buffer.push('<');
+                    write_element(&mut iface_buffer, e);
+                    iface_buffer.push('>');
+                    continue;
+                }
+
+                if name == "interface" {
+                    in_iface = true;
+                    iface_depth = 1;
+                    iface_buffer.clear();
+                    found_mac = false;
+                    iface_buffer.push('<');
+                    write_element(&mut iface_buffer, e);
+                    iface_buffer.push('>');
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push('>');
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if in_iface {
+                    iface_depth -= 1;
+                    iface_buffer.push_str(&format!("</{name}>"));
+                    if iface_depth == 0 {
+                        in_iface = false;
+                        if found_mac {
+                            result.push_str(&rewrite_interface_source(
+                                &iface_buffer,
+                                params,
+                            ));
+                        } else {
+                            result.push_str(&iface_buffer);
+                        }
+                        iface_buffer.clear();
+                    }
+                    continue;
+                }
+
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(Event::Empty(ref e)) => {
+                if in_iface {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if name == "mac" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"address" {
+                                let addr = String::from_utf8_lossy(&attr.value).to_string();
+                                if addr == mac_address {
+                                    found_mac = true;
+                                }
+                            }
+                        }
+                    }
+                    iface_buffer.push('<');
+                    write_element(&mut iface_buffer, e);
+                    iface_buffer.push_str("/>");
+                    continue;
+                }
+
+                result.push('<');
+                write_element(&mut result, e);
+                result.push_str("/>");
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default().to_string();
+                if in_iface {
+                    iface_buffer.push_str(&text);
+                } else {
+                    result.push_str(&text);
+                }
+            }
+            Ok(ref event @ Event::Decl(_)) | Ok(ref event @ Event::Comment(_)) => {
+                copy_event(&mut result, event);
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(AppError::Xml(format!("XML parse error: {e}"))),
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+fn rewrite_interface_source(
+    interface_xml: &str,
+    params: &ChangeNetworkSourceParams,
+) -> String {
+    let mut result = String::new();
+    let mut reader = Reader::from_str(interface_xml);
+    reader.config_mut().trim_text(false);
+
+    let new_iface_type = match params.source_type {
+        NetworkSourceType::VirtualNetwork => "network",
+        NetworkSourceType::Bridge => "bridge",
+        NetworkSourceType::Macvtap => "direct",
+        NetworkSourceType::Vdpa => "vdpa",
+    };
+
+    let new_source = match params.source_type {
+        NetworkSourceType::VirtualNetwork => {
+            format!(r#"<source network="{}"/>"#, params.value)
+        }
+        NetworkSourceType::Bridge => {
+            format!(r#"<source bridge="{}"/>"#, params.value)
+        }
+        NetworkSourceType::Macvtap => {
+            format!(r#"<source dev="{}" mode="vepa"/>"#, params.value)
+        }
+        NetworkSourceType::Vdpa => {
+            format!(r#"<source dev="{}"/>"#, params.value)
+        }
+    };
+
+    let mut source_written = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "interface" {
+                    // Rewrite the opening tag with new type
+                    result.push_str(&format!(r#"<interface type="{}""#, new_iface_type));
+                    // Copy remaining attributes except "type"
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() != b"type" {
+                            let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            result.push_str(&format!(r#" {key}="{val}""#));
+                        }
+                    }
+                    result.push('>');
+                } else if name == "source" {
+                    // Skip old source element (Start + children + End)
+                    if !source_written {
+                        result.push_str(&new_source);
+                        source_written = true;
+                    }
+                    let mut depth = 1u32;
+                    loop {
+                        match reader.read_event() {
+                            Ok(Event::Start(_)) => depth += 1,
+                            Ok(Event::End(_)) => {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
+                            Ok(Event::Eof) => break,
+                            _ => {}
+                        }
+                    }
+                } else {
+                    result.push('<');
+                    write_element(&mut result, e);
+                    result.push('>');
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "source" {
+                    // Replace with new source
+                    if !source_written {
+                        result.push_str(&new_source);
+                        source_written = true;
+                    }
+                } else {
+                    result.push('<');
+                    write_element(&mut result, e);
+                    result.push_str("/>");
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "interface" && !source_written {
+                    // Interface had no source element — inject before close
+                    result.push_str(&new_source);
+                }
+                result.push_str(&format!("</{name}>"));
+            }
+            Ok(ref event @ Event::Eof) => {
+                copy_event(&mut result, event);
+                break;
+            }
+            Ok(ref event) => {
+                copy_event(&mut result, event);
+            }
+            Err(_) => break,
+        }
+    }
+
+    result
 }
