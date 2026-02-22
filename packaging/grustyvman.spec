@@ -44,8 +44,8 @@ install -Dm755 target/release/grustyvman \
 install -Dm755 target/release/grustyvman-viewer \
     %{buildroot}%{_bindir}/grustyvman-viewer
 
-install -Dm644 packaging/grustyvman.desktop \
-    %{buildroot}%{_datadir}/applications/grustyvman.desktop
+install -Dm644 packaging/com.github.grustyvman.desktop \
+    %{buildroot}%{_datadir}/applications/com.github.grustyvman.desktop
 install -Dm644 packaging/grustyvman-viewer.desktop \
     %{buildroot}%{_datadir}/applications/grustyvman-viewer.desktop
 
@@ -73,7 +73,7 @@ fi
 %files
 %{_bindir}/grustyvman
 %{_bindir}/grustyvman-viewer
-%{_datadir}/applications/grustyvman.desktop
+%{_datadir}/applications/com.github.grustyvman.desktop
 %{_datadir}/applications/grustyvman-viewer.desktop
 %{_datadir}/icons/hicolor/256x256/apps/grustyvman.png
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
