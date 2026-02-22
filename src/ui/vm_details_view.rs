@@ -8,6 +8,7 @@ pub struct VmDetailsView {
     pub container: gtk::Box,
     status_row: adw::ActionRow,
     id_row: adw::ActionRow,
+    os_name_row: adw::ActionRow,
     uuid_row: adw::ActionRow,
     autostart_row: adw::ActionRow,
     vcpus_row: adw::ActionRow,
@@ -45,6 +46,11 @@ impl VmDetailsView {
         id_row.set_title("Domain ID");
         id_row.set_activatable(false);
         status_group.add(&id_row);
+
+        let os_name_row = adw::ActionRow::new();
+        os_name_row.set_title("Operating System");
+        os_name_row.set_activatable(false);
+        status_group.add(&os_name_row);
 
         let uuid_row = adw::ActionRow::new();
         uuid_row.set_title("UUID");
@@ -129,6 +135,7 @@ impl VmDetailsView {
             container,
             status_row,
             id_row,
+            os_name_row,
             uuid_row,
             autostart_row,
             vcpus_row,
@@ -149,6 +156,7 @@ impl VmDetailsView {
     pub fn update(&self, details: &DomainDetails, state_label: &str, domain_id: Option<u32>, autostart: bool) {
         self.status_row.set_subtitle(state_label);
         self.id_row.set_subtitle(&domain_id.map(|id| id.to_string()).unwrap_or_else(|| "-".to_string()));
+        self.os_name_row.set_subtitle(details.os_name.as_deref().unwrap_or("-"));
         self.uuid_row.set_subtitle(&details.uuid);
         self.autostart_row.set_subtitle(if autostart { "Yes" } else { "No" });
         self.vcpus_row.set_subtitle(&details.vcpus.to_string());

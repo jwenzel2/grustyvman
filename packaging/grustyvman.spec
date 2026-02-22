@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.0
+Version:        1.1
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,5 +79,10 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
-* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.0-1
+* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.1-1
+- Add OS selection with type-to-search to VM creation dialog
+- Display OS name in VM status view
+- Add Snapshot button to SPICE viewer toolbar
+
+* Sat Feb 22 2025 Jeremiah Wenzel <jeremiah@grustyvman> - 1.0-1
 - Initial release

@@ -1590,4 +1590,5 @@ pub struct DomainDetails {
     pub usbredirs: Vec<UsbredirInfo>,
     pub smartcard: Option<SmartcardMode>,
     pub memballoon: Option<MemballoonModel>,
+    pub os_name: Option<String>,  // human-readable OS name from libosinfo, e.g. "Fedora 40"
 }

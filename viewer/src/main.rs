@@ -111,6 +111,7 @@ const ACTION_SHUTDOWN: i32     = 3;
 const ACTION_REBOOT: i32       = 4;
 const ACTION_FORCE_STOP: i32   = 5;
 const ACTION_FORCE_REBOOT: i32 = 6;
+const ACTION_SNAPSHOT: i32     = 7;
 
 struct VmControl {
     uri: String,
@@ -147,6 +148,18 @@ impl VmControl {
         self.with_domain(|d| d.destroy())?;
         std::thread::sleep(std::time::Duration::from_millis(400));
         self.with_domain(|d| d.create())
+    }
+
+    fn snapshot(&self) -> Result<(), String> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let name = format!("snap-{ts}");
+        let xml = format!("<domainsnapshot><name>{name}</name></domainsnapshot>");
+        self.with_domain(|d| {
+            virt::domain_snapshot::DomainSnapshot::create_xml(d, &xml, 0).map(|_| ())
+        })
     }
 
     fn spice_endpoint(&self) -> Result<Option<SpiceEndpoint>, String> {
@@ -325,6 +338,7 @@ unsafe extern "C" fn vm_action_cb(action: c_int, user_data: *mut c_void) {
             x if x == ACTION_REBOOT       => vm.reboot(),
             x if x == ACTION_FORCE_STOP   => vm.force_stop(),
             x if x == ACTION_FORCE_REBOOT => vm.force_reboot(),
+            x if x == ACTION_SNAPSHOT     => vm.snapshot(),
             other => {
                 eprintln!("grustyvman-viewer: unknown action id {other}");
                 return;

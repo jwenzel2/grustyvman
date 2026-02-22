@@ -20,7 +20,8 @@ pub struct NewVmParams {
     pub iso_path: Option<String>,
     pub firmware: FirmwareType,
     pub network: NewVmNetworkConfig,
-    pub tpm_model: Option<TpmModel>, // None = no TPM
+    pub tpm_model: Option<TpmModel>,       // None = no TPM
+    pub os_variant_id: Option<String>,     // libosinfo URI, e.g. "http://fedoraproject.org/fedora/40"
 }
 
 pub fn extract_interface_targets(xml: &str) -> Vec<String> {
@@ -69,6 +70,13 @@ pub fn extract_interface_targets(xml: &str) -> Vec<String> {
 pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
     let memory_kib = params.memory_mib * 1024;
 
+    let metadata_xml = match &params.os_variant_id {
+        Some(id) => format!(
+            "\n  <metadata>\n    <libosinfo:libosinfo xmlns:libosinfo=\"http://libosinfo.org/xmlns/libvirt/domain/1.0\">\n      <libosinfo:os id=\"{id}\"/>\n    </libosinfo:libosinfo>\n  </metadata>"
+        ),
+        None => String::new(),
+    };
+
     let os_tag = match params.firmware {
         FirmwareType::Efi => r#"<os firmware="efi">"#,
         FirmwareType::Bios => "<os>",
@@ -113,7 +121,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
 
     let xml = format!(
         r#"<domain type="kvm">
-  <name>{name}</name>
+  <name>{name}</name>{metadata_xml}
   <memory unit="KiB">{memory_kib}</memory>
   <vcpu placement="static">{vcpus}</vcpu>
   {os_tag}
@@ -148,6 +156,7 @@ pub fn generate_domain_xml(params: &NewVmParams, disk_path: &str) -> String {
   </devices>
 </domain>"#,
         name = params.name,
+        metadata_xml = metadata_xml,
         memory_kib = memory_kib,
         vcpus = params.vcpus,
         os_tag = os_tag,
@@ -229,6 +238,7 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
         usbredirs: Vec::new(),
         smartcard: None,
         memballoon: None,
+        os_name: None,
     };
 
     #[derive(Debug)]
@@ -312,12 +322,23 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
     let mut parallel_port: u32 = 0;
     // Redirdev count
     let mut redirdev_count: u32 = 0;
+    // libosinfo metadata
+    let mut in_metadata = false;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 match name.as_str() {
+                    "metadata" => in_metadata = true,
+                    "libosinfo:os" if in_metadata => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"id" {
+                                let uri = String::from_utf8_lossy(&attr.value).to_string();
+                                details.os_name = crate::backend::osinfo::lookup_os_name_by_uri(&uri);
+                            }
+                        }
+                    }
                     "name" if !in_devices => context = Context::Name,
                     "uuid" => context = Context::Uuid,
                     "memory" => context = Context::Memory,
@@ -883,6 +904,9 @@ pub fn parse_domain_xml(xml: &str) -> Result<DomainDetails, AppError> {
             Ok(Event::End(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 match name.as_str() {
+                    "metadata" => {
+                        in_metadata = false;
+                    }
                     "os" => {
                         in_os = false;
                     }

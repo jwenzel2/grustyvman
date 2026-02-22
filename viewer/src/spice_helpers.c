@@ -18,6 +18,7 @@
 #define GRV_ACTION_REBOOT        4
 #define GRV_ACTION_FORCE_STOP    5
 #define GRV_ACTION_FORCE_REBOOT  6
+#define GRV_ACTION_SNAPSHOT      7
 
 typedef void (*GrvActionFn)(int action, void *user_data);
 
@@ -432,6 +433,8 @@ build_toolbar(GrvViewer *v)
         make_action_btn(v, "Resume",   GRV_ACTION_RESUME),   FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar),
         make_action_btn(v, "Shutdown", GRV_ACTION_SHUTDOWN), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bar),
+        make_action_btn(v, "Snapshot", GRV_ACTION_SNAPSHOT), FALSE, FALSE, 0);
 
     /* ── More dropdown ─────────────────────────────────────────────────── */
     {

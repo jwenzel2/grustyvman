@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::backend::domain_xml::NewVmParams;
+use crate::backend::osinfo::{load_os_list, OsEntry};
 use crate::backend::types::{DiskFormat, FirmwareType, NetworkModel, NetworkSourceType, NewVmNetworkConfig, TpmModel, VolumeInfo};
 
 pub fn show_creation_dialog(
@@ -16,7 +17,7 @@ pub fn show_creation_dialog(
 ) {
     let dialog = gtk::Window::new();
     dialog.set_title(Some("New Virtual Machine"));
-    dialog.set_default_size(480, 520);
+    dialog.set_default_size(480, 560);
     dialog.set_decorated(false); // suppress WM title bar; adw::HeaderBar provides the only bar
     dialog.set_modal(true);
     dialog.set_transient_for(Some(parent));
@@ -43,6 +44,12 @@ pub fn show_creation_dialog(
     name_row.set_title("Name");
     name_row.set_text("new-vm");
     general_group.add(&name_row);
+
+    // OS search row
+    let os_row = adw::EntryRow::new();
+    os_row.set_title("Operating System");
+    os_row.set_show_apply_button(false);
+    general_group.add(&os_row);
 
     let firmware_labels: Vec<&str> = FirmwareType::ALL.iter().map(|f| f.label()).collect();
     let firmware_list = gtk::StringList::new(&firmware_labels);
@@ -261,6 +268,131 @@ pub fn show_creation_dialog(
     toolbar_view.set_content(Some(&clamp));
     dialog.set_child(Some(&toolbar_view));
 
+    // --- OS search popover (set up after dialog tree is built) ---
+    // Load OS list from osinfo-db (matches virt-manager's OS list)
+    let os_entries: Rc<Vec<OsEntry>> = Rc::new(load_os_list());
+
+    // Tracks which OS the user has confirmed by selecting from the list
+    let selected_os: Rc<RefCell<Option<OsEntry>>> = Rc::new(RefCell::new(None));
+
+    // Tracks results currently shown in the popover (index matches ListBox row index)
+    let current_results: Rc<RefCell<Vec<OsEntry>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Guard to avoid re-triggering 'changed' when we programmatically set text
+    let updating_text = Rc::new(RefCell::new(false));
+
+    // Build the popover
+    let os_list_box = gtk::ListBox::new();
+    os_list_box.set_selection_mode(gtk::SelectionMode::Browse);
+
+    let os_scroll = gtk::ScrolledWindow::new();
+    os_scroll.set_size_request(440, 240);
+    os_scroll.set_child(Some(&os_list_box));
+
+    let os_popover = gtk::Popover::new();
+    os_popover.set_has_arrow(false);
+    os_popover.set_autohide(true);
+    os_popover.set_position(gtk::PositionType::Bottom);
+    os_popover.set_child(Some(&os_scroll));
+    os_popover.set_parent(&os_row);
+
+    // Wire up: typing in os_row filters the list and shows/hides the popover
+    let os_entries_c1 = os_entries.clone();
+    let current_results_c1 = current_results.clone();
+    let selected_os_c1 = selected_os.clone();
+    let updating_c1 = updating_text.clone();
+    let os_list_box_c1 = os_list_box.clone();
+    let os_popover_c1 = os_popover.clone();
+
+    os_row.connect_changed(move |entry| {
+        if *updating_c1.borrow() {
+            return;
+        }
+
+        // Any manual edit clears the confirmed selection
+        *selected_os_c1.borrow_mut() = None;
+
+        let query = entry.text().to_lowercase();
+
+        // Clear existing rows
+        while let Some(child) = os_list_box_c1.first_child() {
+            os_list_box_c1.remove(&child);
+        }
+
+        if query.len() < 2 {
+            os_popover_c1.popdown();
+            *current_results_c1.borrow_mut() = Vec::new();
+            return;
+        }
+
+        // Filter by name or short_id, cap at 80 results
+        let mut results: Vec<OsEntry> = Vec::new();
+        for entry in os_entries_c1.iter() {
+            if results.len() >= 80 {
+                break;
+            }
+            if entry.name.to_lowercase().contains(&query)
+                || entry.short_id.to_lowercase().contains(&query)
+            {
+                results.push(entry.clone());
+            }
+        }
+
+        if results.is_empty() {
+            os_popover_c1.popdown();
+            *current_results_c1.borrow_mut() = Vec::new();
+            return;
+        }
+
+        // Populate list box
+        for result in &results {
+            let row = gtk::ListBoxRow::new();
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 1);
+            vbox.set_margin_start(8);
+            vbox.set_margin_end(8);
+            vbox.set_margin_top(6);
+            vbox.set_margin_bottom(6);
+
+            let name_label = gtk::Label::new(Some(&result.name));
+            name_label.set_halign(gtk::Align::Start);
+            name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+            let id_label = gtk::Label::new(Some(&result.short_id));
+            id_label.set_halign(gtk::Align::Start);
+            id_label.add_css_class("caption");
+            id_label.add_css_class("dim-label");
+
+            vbox.append(&name_label);
+            vbox.append(&id_label);
+            row.set_child(Some(&vbox));
+            os_list_box_c1.append(&row);
+        }
+
+        *current_results_c1.borrow_mut() = results;
+        os_popover_c1.popup();
+    });
+
+    // Wire up: activating a list row fills in the entry and stores the selection
+    let current_results_c2 = current_results.clone();
+    let selected_os_c2 = selected_os.clone();
+    let updating_c2 = updating_text.clone();
+    let os_row_c2 = os_row.clone();
+    let os_popover_c2 = os_popover.clone();
+
+    os_list_box.connect_row_activated(move |_, row| {
+        let idx = row.index() as usize;
+        let results = current_results_c2.borrow();
+        if let Some(entry) = results.get(idx) {
+            *selected_os_c2.borrow_mut() = Some(entry.clone());
+            *updating_c2.borrow_mut() = true;
+            os_row_c2.set_text(&entry.name);
+            *updating_c2.borrow_mut() = false;
+            os_popover_c2.popdown();
+        }
+    });
+    // --- end OS search popover ---
+
+    let selected_os_c3 = selected_os.clone();
     let dialog_ref = dialog.clone();
     create_btn.connect_clicked(move |_| {
         let fw_idx = firmware_row.selected() as usize;
@@ -287,6 +419,8 @@ pub fn show_creation_dialog(
             None
         };
 
+        let os_variant_id = selected_os_c3.borrow().as_ref().map(|e| e.id.clone());
+
         let params = NewVmParams {
             name: name_row.text().to_string(),
             vcpus: cpu_row.value() as u32,
@@ -297,6 +431,7 @@ pub fn show_creation_dialog(
             firmware,
             network: NewVmNetworkConfig { source_type, source_value, model },
             tpm_model,
+            os_variant_id,
         };
 
         if params.name.is_empty() {
