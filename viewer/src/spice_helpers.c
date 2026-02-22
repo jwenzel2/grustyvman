@@ -19,6 +19,9 @@
 #define GRV_ACTION_FORCE_STOP    5
 #define GRV_ACTION_FORCE_REBOOT  6
 #define GRV_ACTION_SNAPSHOT      7
+/* Fired internally when the SPICE main channel closes unexpectedly so Rust
+ * can decide whether to reconnect (VM still active) or show powered-off. */
+#define GRV_ACTION_CHANNEL_CLOSED 8
 
 typedef void (*GrvActionFn)(int action, void *user_data);
 
@@ -183,9 +186,14 @@ on_channel_event(SpiceChannel *channel, SpiceChannelEvent event, gpointer data)
     if (event == SPICE_CHANNEL_OPENED) {
         show_display(v);
     } else if (event == SPICE_CHANNEL_CLOSED) {
+        /* Show a neutral "reconnecting" message and let Rust check whether
+         * the VM is still active.  If it is (e.g. snapshot revert) Rust will
+         * reconnect; if not it will switch to the powered-off message. */
         show_powered_off(v,
-            "VM Powered Off",
-            "The virtual machine has stopped.");
+            "Reconnecting",
+            "Waiting for VM\xe2\x80\xa6");
+        if (v->action_fn)
+            v->action_fn(GRV_ACTION_CHANNEL_CLOSED, v->action_data);
     } else if (event >= SPICE_CHANNEL_ERROR_CONNECT) {
         show_powered_off(v,
             "Connection Lost",
@@ -550,9 +558,13 @@ grv_viewer_reconnect(GrvViewer *v,
         v->display = NULL;
     }
 
-    /* Build a fresh SPICE session/display pair to avoid stale channel state
-     * after a full VM power cycle. */
-    v->main_channel = NULL; /* old channel is gone; on_channel_new will repopulate */
+    /* Detach our callbacks from the old main channel before disconnecting the
+     * session, so the resulting CHANNEL_CLOSED event on the old channel does
+     * not trigger another reconnect attempt. */
+    if (v->main_channel) {
+        g_signal_handlers_disconnect_by_data(v->main_channel, v);
+        v->main_channel = NULL;
+    }
     spice_session_disconnect(old_session);
 
     SpiceSession *session = spice_session_new();
@@ -654,6 +666,15 @@ grv_viewer_set_powered_off(GrvViewer *v)
 {
     show_powered_off(v, "VM Powered Off",
                      "The virtual machine has stopped.");
+}
+
+/* Called via g_idle_add when a snapshot revert is detected, before waiting
+ * for SPICE to come back.  Must be invoked on the GTK main thread. */
+void
+grv_viewer_set_reverting(GrvViewer *v)
+{
+    show_powered_off(v, "Restoring Snapshot",
+                     "Reconnecting to VM\xe2\x80\xa6");
 }
 
 /* ---- Snapshot progress dialog ----------------------------------------- */

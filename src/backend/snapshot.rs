@@ -79,16 +79,25 @@ fn parse_snapshot_xml(xml: &str) -> Option<SnapshotInfo> {
     }
 
     let mut ctx = Context::None;
+    let mut depth: u32 = 0;
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"name" => ctx = Context::Name,
-                b"description" => ctx = Context::Description,
-                b"state" => ctx = Context::State,
-                b"creationTime" => ctx = Context::CreationTime,
-                _ => {}
-            },
+            Ok(Event::Start(ref e)) => {
+                // Only capture snapshot-level fields (depth == 1, i.e. direct
+                // children of <domainsnapshot>). The embedded <domain> block
+                // also contains a <name> element which must not overwrite ours.
+                if depth == 1 {
+                    match e.name().as_ref() {
+                        b"name" => ctx = Context::Name,
+                        b"description" => ctx = Context::Description,
+                        b"state" => ctx = Context::State,
+                        b"creationTime" => ctx = Context::CreationTime,
+                        _ => {}
+                    }
+                }
+                depth += 1;
+            }
             Ok(Event::Text(ref e)) => {
                 let text = e.unescape().unwrap_or_default().to_string();
                 match ctx {
@@ -103,6 +112,7 @@ fn parse_snapshot_xml(xml: &str) -> Option<SnapshotInfo> {
             }
             Ok(Event::End(_)) => {
                 ctx = Context::None;
+                depth = depth.saturating_sub(1);
             }
             Ok(Event::Eof) => break,
             Err(_) => break,

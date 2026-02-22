@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="1.3"
+VERSION="1.4"
 NAME="grustyvman"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

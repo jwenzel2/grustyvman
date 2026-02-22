@@ -49,6 +49,10 @@ extern "C" {
     /// main thread (use via g_idle_add from background threads).
     fn grv_viewer_set_powered_off(viewer: *mut GrvViewer);
 
+    /// Show "Restoring Snapshot…" on the status page while waiting for SPICE
+    /// to come back after a revert.  Must be called on the GTK main thread.
+    fn grv_viewer_set_reverting(viewer: *mut GrvViewer);
+
     /// Reconfigure session host/port/password and reconnect. Must be called on
     /// the GTK main thread.
     fn grv_viewer_reconnect(
@@ -93,6 +97,12 @@ unsafe extern "C" fn idle_set_powered_off(data: *mut c_void) -> c_int {
     0 // G_SOURCE_REMOVE — run only once
 }
 
+/// GLib idle callback: switches the viewer to the "Restoring Snapshot…" screen.
+unsafe extern "C" fn idle_set_reverting(data: *mut c_void) -> c_int {
+    grv_viewer_set_reverting(data as *mut GrvViewer);
+    0 // G_SOURCE_REMOVE
+}
+
 /// Integer-encoded viewer pointer for safe cross-thread transfer.
 /// Raw pointers are not Send; storing the address as `usize` sidesteps that
 /// while keeping the semantics identical (single-writer, GTK-main-thread-only
@@ -118,14 +128,16 @@ extern "C" {
 // ---------------------------------------------------------------------------
 
 /// Action IDs — must match the `#define GRV_ACTION_*` values in spice_helpers.c.
-const ACTION_POWER_ON: i32     = 0;
-const ACTION_PAUSE: i32        = 1;
-const ACTION_RESUME: i32       = 2;
-const ACTION_SHUTDOWN: i32     = 3;
-const ACTION_REBOOT: i32       = 4;
-const ACTION_FORCE_STOP: i32   = 5;
-const ACTION_FORCE_REBOOT: i32 = 6;
-const ACTION_SNAPSHOT: i32     = 7;
+const ACTION_POWER_ON: i32      = 0;
+const ACTION_PAUSE: i32         = 1;
+const ACTION_RESUME: i32        = 2;
+const ACTION_SHUTDOWN: i32      = 3;
+const ACTION_REBOOT: i32        = 4;
+const ACTION_FORCE_STOP: i32    = 5;
+const ACTION_FORCE_REBOOT: i32  = 6;
+const ACTION_SNAPSHOT: i32      = 7;
+/// Fired by C when the SPICE main channel closes unexpectedly.
+const ACTION_CHANNEL_CLOSED: i32 = 8;
 
 struct VmControl {
     uri: String,
@@ -400,6 +412,32 @@ unsafe extern "C" fn vm_action_cb(action: c_int, user_data: *mut c_void) {
         return;
     }
 
+    // SPICE main channel closed: check if the VM is still active and reconnect
+    // if so (e.g. after a snapshot revert).  If the VM is off, show the
+    // powered-off page.
+    if action == ACTION_CHANNEL_CLOSED {
+        std::thread::spawn(move || {
+            // Brief delay so the VM state settles after the SPICE disconnect.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let vm = VmControl { uri, uuid };
+            if vm.is_active() {
+                eprintln!("grustyvman-viewer: SPICE closed but VM is active — reconnecting");
+                if let Some(endpoint) = wait_for_spice_endpoint(&vm, 20) {
+                    schedule_reconnect(viewer_addr, endpoint);
+                    return;
+                }
+                eprintln!("grustyvman-viewer: timed out waiting for SPICE after disconnect");
+            }
+            // VM is off (or SPICE never came back) — show powered-off page.
+            if viewer_addr != 0 {
+                unsafe {
+                    g_idle_add(idle_set_powered_off, viewer_addr as *mut c_void);
+                }
+            }
+        });
+        return;
+    }
+
     std::thread::spawn(move || {
         let vm = VmControl { uri, uuid };
         let is_power_on = action == ACTION_POWER_ON;
@@ -547,27 +585,60 @@ fn main() {
         ViewerHandle(viewer as usize)
     };
 
-    // ── Libvirt polling thread (safe spawn, unsafe g_idle_add inside) ───────
-    // For orderly ACPI shutdowns, QEMU keeps the SPICE server alive after the
-    // guest OS stops, so SPICE_CHANNEL_CLOSED is never emitted and the display
-    // just freezes.  We poll libvirt every 2 s and schedule the powered-off
-    // screen via g_idle_add when the VM is no longer active.
+    let poll_viewer_addr = viewer_handle.0;
+
+    // ── Libvirt VM-state polling thread ─────────────────────────────────────
+    // Runs forever and tracks transitions in *both* directions:
+    //
+    //   active → inactive : show the powered-off page (handles ACPI shutdown
+    //                        where QEMU keeps SPICE alive and CHANNEL_CLOSED
+    //                        is never emitted)
+    //
+    //   inactive → active : reconnect the display (handles snapshot reverts,
+    //                        external power-on, or any other case where the VM
+    //                        comes back while the viewer is on the powered-off
+    //                        page)
     std::thread::spawn(move || {
         let poll_vm = VmControl { uri: poll_uri, uuid: poll_uuid };
-        // Brief initial delay so we don't fire during VM boot.
+
+        // Seed the initial state so we don't fire spuriously on startup.
+        let mut was_active = poll_vm.is_active();
+
+        // Brief initial delay to let the VM / SPICE server settle before
+        // we start watching for transitions.
         std::thread::sleep(std::time::Duration::from_secs(4));
+
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            if !poll_vm.is_active() {
-                // g_idle_add schedules the callback on the GLib main-loop thread.
+            let now_active = poll_vm.is_active();
+
+            if was_active && !now_active {
+                // VM just became inactive — show powered-off page.
                 unsafe {
-                    g_idle_add(
-                        idle_set_powered_off,
-                        viewer_handle.0 as *mut c_void,
-                    );
+                    g_idle_add(idle_set_powered_off, poll_viewer_addr as *mut c_void);
                 }
-                break;
+            } else if !was_active && now_active {
+                // VM just became active (snapshot revert, external power-on, …)
+                // — reconnect the display.
+                eprintln!("grustyvman-viewer: VM became active, reconnecting SPICE");
+                if poll_viewer_addr != 0 {
+                    unsafe {
+                        g_idle_add(idle_set_reverting, poll_viewer_addr as *mut c_void);
+                    }
+                }
+                if let Some(endpoint) = wait_for_spice_endpoint(&poll_vm, 20) {
+                    schedule_reconnect(poll_viewer_addr, endpoint);
+                } else {
+                    eprintln!("grustyvman-viewer: timed out waiting for SPICE after VM activation");
+                    if poll_viewer_addr != 0 {
+                        unsafe {
+                            g_idle_add(idle_set_powered_off, poll_viewer_addr as *mut c_void);
+                        }
+                    }
+                }
             }
+
+            was_active = now_active;
         }
     });
 

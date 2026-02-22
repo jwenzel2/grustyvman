@@ -222,25 +222,15 @@ fn find_viewer_binary() -> std::path::PathBuf {
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(
-            cwd.join("viewer")
-                .join("target")
-                .join("debug")
-                .join("grustyvman-viewer"),
-        );
-        candidates.push(
-            cwd.join("viewer")
-                .join("target")
-                .join("release")
-                .join("grustyvman-viewer"),
-        );
-        candidates.push(cwd.join("viewer").join("grustyvman-viewer"));
-    }
-
+    // Prefer the binary built alongside the main app by the workspace
+    // (always current after `cargo run` from the repo root).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("grustyvman-viewer"));
             if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("debug").join("grustyvman-viewer"));
+                candidates.push(parent.join("release").join("grustyvman-viewer"));
+
                 if let Some(repo_root) = parent.parent() {
                     candidates.push(
                         repo_root
@@ -258,13 +248,24 @@ fn find_viewer_binary() -> std::path::PathBuf {
                     );
                     candidates.push(repo_root.join("viewer").join("grustyvman-viewer"));
                 }
-
-                candidates.push(parent.join("debug").join("grustyvman-viewer"));
-                candidates.push(parent.join("release").join("grustyvman-viewer"));
             }
-
-            candidates.push(dir.join("grustyvman-viewer"));
         }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(
+            cwd.join("viewer")
+                .join("target")
+                .join("debug")
+                .join("grustyvman-viewer"),
+        );
+        candidates.push(
+            cwd.join("viewer")
+                .join("target")
+                .join("release")
+                .join("grustyvman-viewer"),
+        );
+        candidates.push(cwd.join("viewer").join("grustyvman-viewer"));
     }
 
     for candidate in candidates {

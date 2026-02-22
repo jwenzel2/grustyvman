@@ -2383,8 +2383,44 @@ impl Window {
             let Some(uuid) = uuid else { return };
             let snap_name = snap_name.clone();
 
+            // Progress dialog — shown while the revert runs on the thread pool.
+            let progress = adw::Window::builder()
+                .title("Reverting Snapshot")
+                .modal(true)
+                .transient_for(&win)
+                .default_width(320)
+                .resizable(false)
+                .deletable(false)
+                .build();
+
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 16);
+            vbox.set_margin_top(32);
+            vbox.set_margin_bottom(32);
+            vbox.set_margin_start(24);
+            vbox.set_margin_end(24);
+            vbox.set_halign(gtk::Align::Center);
+
+            let spinner = gtk::Spinner::new();
+            spinner.set_size_request(48, 48);
+            spinner.start();
+
+            let label = gtk::Label::new(Some(&format!("Reverting to \"{snap_name}\"…")));
+            label.set_wrap(true);
+            label.set_max_width_chars(40);
+            label.add_css_class("dim-label");
+
+            vbox.append(&spinner);
+            vbox.append(&label);
+
+            let toolbar = adw::ToolbarView::new();
+            toolbar.add_top_bar(&adw::HeaderBar::new());
+            toolbar.set_content(Some(&vbox));
+            progress.set_content(Some(&toolbar));
+            progress.present();
+
             let win2 = win.downgrade();
             let uuid2 = uuid.clone();
+            let progress_weak = progress.downgrade();
 
             let rx = spawn_blocking(move || {
                 backend::snapshot::revert_snapshot(&uri, &uuid, &snap_name)
@@ -2392,6 +2428,9 @@ impl Window {
 
             glib::spawn_future_local(async move {
                 let Ok(result) = rx.recv().await else { return };
+                if let Some(p) = progress_weak.upgrade() {
+                    p.close();
+                }
                 let Some(win) = win2.upgrade() else { return };
 
                 match result {
@@ -2399,6 +2438,13 @@ impl Window {
                         win.show_toast("Reverted to snapshot");
                         win.refresh_vm_list();
                         win.load_vm_details(&uuid2);
+                        // Signal any open viewer to reconnect its display.
+                        let signal_path = format!("/tmp/grustyvman-revert-{uuid2}");
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let _ = std::fs::write(&signal_path, ts.to_string());
                     }
                     Err(e) => {
                         win.show_toast(&format!("Failed to revert: {e}"));

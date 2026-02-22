@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.3
+Version:        1.4
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,7 +79,13 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
-* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.3-1
+* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.4-1
+- Fix viewer always picking up stale binary from viewer/target/ instead of workspace build
+- Add snapshot revert progress dialog
+- Reconnect SPICE display after snapshot revert
+- Fix snapshot XML parser capturing nested <name> from embedded <domain> block
+
+* Sun Feb 22 2026 Jeremiah Wenzel <jeremiah@grustyvman> - 1.3-1
 - Fix duplicate snapshot entries caused by broken row-clearing logic
 - Fix FileMonitor double-firing on new signal file creation
 
