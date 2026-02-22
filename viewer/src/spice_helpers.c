@@ -609,6 +609,7 @@ grv_viewer_build(const char *title,
     /* Top-level window */
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), title);
+    gtk_window_set_icon_name(GTK_WINDOW(window), "grustyvman");
     gtk_window_set_default_size(GTK_WINDOW(window), 1024, 768);
     g_signal_connect(window, "delete-event",    G_CALLBACK(on_delete_event), NULL);
     g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press),    v);

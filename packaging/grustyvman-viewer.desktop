@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Grustyvman Viewer
+Comment=SPICE console viewer for Grustyvman
+Exec=grustyvman-viewer
+Icon=grustyvman
+Terminal=false
+Type=Application
+Categories=System;
+NoDisplay=true
+StartupWMClass=grustyvman-viewer

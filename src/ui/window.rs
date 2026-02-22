@@ -139,6 +139,7 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj();
             obj.set_title(Some("Grustyvman"));
+            obj.set_icon_name(Some("grustyvman"));
             obj.set_default_size(1000, 700);
             obj.setup_ui();
         }
