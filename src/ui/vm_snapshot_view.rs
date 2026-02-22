@@ -16,6 +16,11 @@ pub struct VmSnapshotView {
     on_create: RefCell<Option<Rc<dyn Fn()>>>,
     on_revert: RefCell<Option<Rc<dyn Fn(String)>>>,
     on_delete: RefCell<Option<Rc<dyn Fn(String)>>>,
+    /// Tracks rows we've added so we can reliably remove them.
+    /// `PreferencesGroup::first_child()` walks internal implementation
+    /// widgets, not the logically-added rows, so widget-tree traversal
+    /// can't find them — we must keep our own list.
+    rows: RefCell<Vec<adw::ActionRow>>,
 }
 
 impl VmSnapshotView {
@@ -61,6 +66,7 @@ impl VmSnapshotView {
             on_create: RefCell::new(None),
             on_revert: RefCell::new(None),
             on_delete: RefCell::new(None),
+            rows: RefCell::new(Vec::new()),
         }
     }
 
@@ -77,8 +83,14 @@ impl VmSnapshotView {
     }
 
     pub fn update(&self, snapshots: &[SnapshotInfo]) {
-        // Clear existing rows
-        clear_pref_group(&self.snapshots_group);
+        // Remove previously-added rows. We track them ourselves because
+        // PreferencesGroup::first_child() walks its internal implementation
+        // widgets, not the rows we added, so widget-tree traversal misses them.
+        for row in self.rows.borrow().iter() {
+            self.snapshots_group.remove(row);
+        }
+        self.rows.borrow_mut().clear();
+        self.snapshots_group.set_header_suffix(None::<&gtk::Widget>);
 
         // Create button in header suffix
         let create_btn = gtk::Button::from_icon_name("list-add-symbolic");
@@ -160,6 +172,7 @@ impl VmSnapshotView {
             row.add_suffix(&delete_btn);
 
             self.snapshots_group.add(&row);
+            self.rows.borrow_mut().push(row);
         }
     }
 }
@@ -175,19 +188,3 @@ fn format_timestamp(epoch: i64) -> String {
     }
 }
 
-fn clear_pref_group(group: &adw::PreferencesGroup) {
-    group.set_header_suffix(None::<&gtk::Widget>);
-
-    let mut rows_to_remove = Vec::new();
-    let mut child = group.first_child();
-    while let Some(c) = child {
-        let next = c.next_sibling();
-        if c.downcast_ref::<adw::ActionRow>().is_some() {
-            rows_to_remove.push(c);
-        }
-        child = next;
-    }
-    for row in rows_to_remove {
-        group.remove(&row);
-    }
-}

@@ -2282,10 +2282,10 @@ impl Window {
         let win = self.downgrade();
         let uuid = uuid.to_string();
         monitor.connect_changed(move |_monitor, _file, _other, event| {
-            if !matches!(
-                event,
-                gio::FileMonitorEvent::Created | gio::FileMonitorEvent::Changed
-            ) {
+            // ChangesDoneHint fires exactly once after a write completes (both
+            // new-file and overwrite), so we use it instead of Created/Changed
+            // to avoid triggering multiple reloads per snapshot operation.
+            if event != gio::FileMonitorEvent::ChangesDoneHint {
                 return;
             }
             let Some(win) = win.upgrade() else { return };
