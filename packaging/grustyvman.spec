@@ -18,6 +18,7 @@ BuildRequires:  libadwaita-devel
 BuildRequires:  glib2-devel
 BuildRequires:  libvirt-devel
 BuildRequires:  spice-gtk3-devel
+BuildRequires:  ImageMagick
 
 Requires:       gtk4
 Requires:       libadwaita
@@ -48,8 +49,14 @@ install -Dm644 packaging/grustyvman.desktop \
 install -Dm644 packaging/grustyvman-viewer.desktop \
     %{buildroot}%{_datadir}/applications/grustyvman-viewer.desktop
 
-install -Dm644 icon.png \
-    %{buildroot}%{_datadir}/icons/hicolor/1024x1024/apps/grustyvman.png
+# Install icon at sizes declared in hicolor's index.theme.
+# 256x256 is used by GNOME Shell's app grid and the running-app taskbar.
+# 512x512 is used on HiDPI displays.
+for size in 256 512; do
+    mkdir -p %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps
+    magick icon.png -resize ${size}x${size} \
+        %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps/grustyvman.png
+done
 
 %post
 /bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
@@ -68,7 +75,8 @@ fi
 %{_bindir}/grustyvman-viewer
 %{_datadir}/applications/grustyvman.desktop
 %{_datadir}/applications/grustyvman-viewer.desktop
-%{_datadir}/icons/hicolor/1024x1024/apps/grustyvman.png
+%{_datadir}/icons/hicolor/256x256/apps/grustyvman.png
+%{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
 * %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.0-1
