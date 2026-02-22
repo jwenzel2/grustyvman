@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.2
+Version:        1.3
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,7 +79,11 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
-* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.2-1
+* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.3-1
+- Fix duplicate snapshot entries caused by broken row-clearing logic
+- Fix FileMonitor double-firing on new signal file creation
+
+* Sun Feb 22 2026 Jeremiah Wenzel <jeremiah@grustyvman> - 1.2-1
 - Show progress dialog when creating snapshot from SPICE viewer
 - Automatically refresh snapshot list in main app after viewer creates a snapshot
 
