@@ -57,6 +57,20 @@ extern "C" {
         port: *const c_char,
         password: *const c_char,
     );
+
+    /// Show a "Creating snapshot…" progress dialog. Must be called on the GTK
+    /// main thread. Returns the GtkWidget* (cast to *mut c_void) for later
+    /// cleanup via grv_snapshot_end.
+    fn grv_snapshot_begin(viewer: *mut GrvViewer) -> *mut c_void;
+
+    /// Close the progress dialog and show an error if `success == 0`. Must be
+    /// called on the GTK main thread (use via g_idle_add from worker threads).
+    fn grv_snapshot_end(
+        dialog: *mut c_void,
+        viewer: *mut GrvViewer,
+        success: c_int,
+        message: *const c_char,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +281,27 @@ fn parse_spice_endpoint(xml: &str) -> Option<SpiceEndpoint> {
     None
 }
 
+/// Heap-allocated context passed from the snapshot worker thread to the GTK
+/// main thread via g_idle_add.
+struct SnapshotEndCtx {
+    dialog_addr: usize,
+    viewer_addr: usize,
+    success: c_int,
+    /// Owned error string (None on success).
+    message: Option<CString>,
+}
+
+unsafe extern "C" fn idle_snapshot_end(data: *mut c_void) -> c_int {
+    let ctx = Box::from_raw(data as *mut SnapshotEndCtx);
+    grv_snapshot_end(
+        ctx.dialog_addr as *mut c_void,
+        ctx.viewer_addr as *mut GrvViewer,
+        ctx.success,
+        ctx.message.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()),
+    );
+    0 // G_SOURCE_REMOVE
+}
+
 #[repr(C)]
 struct ReconnectRequest {
     viewer: *mut GrvViewer,
@@ -327,6 +362,44 @@ unsafe extern "C" fn vm_action_cb(action: c_int, user_data: *mut c_void) {
     let uri = ctx.vm.uri.clone();
     let uuid = ctx.vm.uuid.clone();
     let viewer_addr = ctx.viewer_addr.load(Ordering::Relaxed);
+
+    // Snapshot gets special treatment: show a progress dialog while the
+    // (potentially slow) libvirt call runs, then show success or error.
+    if action == ACTION_SNAPSHOT {
+        let dialog_ptr = if viewer_addr != 0 {
+            grv_snapshot_begin(viewer_addr as *mut GrvViewer)
+        } else {
+            std::ptr::null_mut()
+        };
+        let dialog_addr = dialog_ptr as usize;
+
+        std::thread::spawn(move || {
+            let vm = VmControl { uri, uuid: uuid.clone() };
+            let result = vm.snapshot();
+            let success = result.is_ok();
+
+            // Write a tiny signal file so the main grustyvman app can detect
+            // the new snapshot via GFileMonitor and refresh its snapshot list.
+            if success {
+                let signal_path = format!("/tmp/grustyvman-snap-{uuid}");
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let _ = std::fs::write(&signal_path, ts.to_string());
+            }
+
+            let end_ctx = Box::new(SnapshotEndCtx {
+                dialog_addr,
+                viewer_addr,
+                success: if success { 1 } else { 0 },
+                message: result.err().and_then(|e| CString::new(e).ok()),
+            });
+            g_idle_add(idle_snapshot_end, Box::into_raw(end_ctx) as *mut c_void);
+        });
+        return;
+    }
+
     std::thread::spawn(move || {
         let vm = VmControl { uri, uuid };
         let is_power_on = action == ACTION_POWER_ON;
@@ -338,7 +411,6 @@ unsafe extern "C" fn vm_action_cb(action: c_int, user_data: *mut c_void) {
             x if x == ACTION_REBOOT       => vm.reboot(),
             x if x == ACTION_FORCE_STOP   => vm.force_stop(),
             x if x == ACTION_FORCE_REBOOT => vm.force_reboot(),
-            x if x == ACTION_SNAPSHOT     => vm.snapshot(),
             other => {
                 eprintln!("grustyvman-viewer: unknown action id {other}");
                 return;

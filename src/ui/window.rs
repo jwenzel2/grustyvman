@@ -82,6 +82,8 @@ mod imp {
         pub host_details_view: HostDetailsView,
         // XML editor
         pub xml_editor: VmXmlEditor,
+        // File monitor for viewer-triggered snapshot refresh
+        pub snap_monitor: RefCell<Option<gio::FileMonitor>>,
     }
 
     #[allow(deprecated)]
@@ -123,6 +125,7 @@ mod imp {
                 selected_network_uuid: RefCell::new(None),
                 host_details_view: HostDetailsView::new(),
                 xml_editor: VmXmlEditor::new(),
+                snap_monitor: RefCell::new(None),
             }
         }
     }
@@ -569,6 +572,7 @@ impl Window {
                 if idx < uris.len() {
                     *win.imp().connection_uri.borrow_mut() = uris[idx].to_string();
                     *win.imp().selected_uuid.borrow_mut() = None;
+                    *win.imp().snap_monitor.borrow_mut() = None;
                     *win.imp().selected_pool_uuid.borrow_mut() = None;
                     *win.imp().selected_network_uuid.borrow_mut() = None;
                     win.imp().outer_stack.set_visible_child_name("empty");
@@ -595,10 +599,12 @@ impl Window {
                         *win.imp().selected_uuid.borrow_mut() = Some(uuid.clone());
                         win.imp().view_switcher_title.set_title(&vm.name());
                         win.imp().view_switcher_title.set_subtitle(&vm.state());
+                        win.setup_snapshot_monitor(&uuid);
                         win.load_vm_details(&uuid);
                     }
                 } else {
                     *win.imp().selected_uuid.borrow_mut() = None;
+                    *win.imp().snap_monitor.borrow_mut() = None;
                     win.imp().outer_stack.set_visible_child_name("empty");
                     win.imp().view_switcher_title.set_title("");
                     win.imp().view_switcher_title.set_subtitle("");
@@ -2263,6 +2269,32 @@ impl Window {
                 win.confirm_and_delete_snapshot(&snap_name);
             }
         });
+    }
+
+    fn setup_snapshot_monitor(&self, uuid: &str) {
+        let signal_path = format!("/tmp/grustyvman-snap-{uuid}");
+        let file = gio::File::for_path(&signal_path);
+        let Ok(monitor) = file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        else {
+            return;
+        };
+
+        let win = self.downgrade();
+        let uuid = uuid.to_string();
+        monitor.connect_changed(move |_monitor, _file, _other, event| {
+            if !matches!(
+                event,
+                gio::FileMonitorEvent::Created | gio::FileMonitorEvent::Changed
+            ) {
+                return;
+            }
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().selected_uuid.borrow().as_deref() == Some(uuid.as_str()) {
+                win.load_snapshots(&uuid);
+            }
+        });
+
+        *self.imp().snap_monitor.borrow_mut() = Some(monitor);
     }
 
     fn load_snapshots(&self, uuid: &str) {

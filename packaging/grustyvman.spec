@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.1
+Version:        1.2
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,7 +79,11 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
-* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.1-1
+* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.2-1
+- Show progress dialog when creating snapshot from SPICE viewer
+- Automatically refresh snapshot list in main app after viewer creates a snapshot
+
+* Sun Feb 22 2026 Jeremiah Wenzel <jeremiah@grustyvman> - 1.1-1
 - Add OS selection with type-to-search to VM creation dialog
 - Display OS name in VM status view
 - Add Snapshot button to SPICE viewer toolbar

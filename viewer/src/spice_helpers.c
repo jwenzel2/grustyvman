@@ -655,3 +655,61 @@ grv_viewer_set_powered_off(GrvViewer *v)
     show_powered_off(v, "VM Powered Off",
                      "The virtual machine has stopped.");
 }
+
+/* ---- Snapshot progress dialog ----------------------------------------- */
+
+/* Called on the GTK main thread before spawning the snapshot worker thread.
+ * Returns the GtkDialog* cast to void* for Rust to store as a usize. */
+void *
+grv_snapshot_begin(GrvViewer *v)
+{
+    GtkWidget *dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "Creating Snapshot");
+    if (v && v->window)
+        gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(v->window));
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 320, -1);
+    gtk_window_set_deletable(GTK_WINDOW(dialog), FALSE);
+
+    GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(content), 20);
+
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_set_halign(hbox, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_top(hbox, 8);
+    gtk_widget_set_margin_bottom(hbox, 8);
+
+    GtkWidget *spinner = gtk_spinner_new();
+    gtk_spinner_start(GTK_SPINNER(spinner));
+    gtk_box_pack_start(GTK_BOX(hbox), spinner, FALSE, FALSE, 0);
+
+    /* "…" = U+2026 HORIZONTAL ELLIPSIS, UTF-8: 0xE2 0x80 0xA6 */
+    GtkWidget *label = gtk_label_new("Creating snapshot\xe2\x80\xa6");
+    gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(content), hbox, FALSE, FALSE, 0);
+    gtk_widget_show_all(dialog);
+    return (void *)dialog;
+}
+
+/* Called on the GTK main thread (via g_idle_add) after the snapshot worker
+ * thread completes.  Closes the progress dialog and shows an error if needed. */
+void
+grv_snapshot_end(void *dialog, GrvViewer *v, int success, const char *message)
+{
+    if (dialog)
+        gtk_widget_destroy(GTK_WIDGET(dialog));
+
+    if (!success) {
+        GtkWindow *parent = (v && v->window) ? GTK_WINDOW(v->window) : NULL;
+        GtkWidget *err = gtk_message_dialog_new(
+            parent,
+            GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+            GTK_MESSAGE_ERROR,
+            GTK_BUTTONS_OK,
+            "Snapshot failed: %s",
+            message ? message : "unknown error");
+        gtk_dialog_run(GTK_DIALOG(err));
+        gtk_widget_destroy(err);
+    }
+}
