@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -9,11 +10,80 @@ fn read_sysfs_attr(path: &Path, attr: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Parse /usr/share/hwdata/pci.ids into (vendor_id -> (vendor_name, device_id -> device_name)).
+fn load_pci_ids() -> HashMap<String, (String, HashMap<String, String>)> {
+    let mut map: HashMap<String, (String, HashMap<String, String>)> = HashMap::new();
+    let paths = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"];
+    let content = paths.iter().find_map(|p| fs::read_to_string(p).ok());
+    let content = match content {
+        Some(c) => c,
+        None => return map,
+    };
+
+    let mut current_vendor: Option<String> = None;
+    for line in content.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        // Subsystem line (two tabs) — skip
+        if line.starts_with("\t\t") {
+            continue;
+        }
+        // Device line (one tab)
+        if line.starts_with('\t') {
+            if let Some(vid) = &current_vendor {
+                let trimmed = &line[1..];
+                if let Some((did, name)) = trimmed.split_once("  ") {
+                    let did = did.trim().to_lowercase();
+                    let name = name.trim().to_string();
+                    if let Some(entry) = map.get_mut(vid) {
+                        entry.1.insert(did, name);
+                    }
+                }
+            }
+            continue;
+        }
+        // Vendor line
+        if let Some((vid, name)) = line.split_once("  ") {
+            let vid = vid.trim().to_lowercase();
+            let name = name.trim().to_string();
+            current_vendor = Some(vid.clone());
+            map.insert(vid, (name, HashMap::new()));
+        }
+    }
+    map
+}
+
+fn pci_display_name(
+    address: &str,
+    vendor_hex: &str,
+    device_hex: &str,
+    pci_ids: &HashMap<String, (String, HashMap<String, String>)>,
+) -> String {
+    // sysfs gives "0x10de"; strip prefix and lowercase for lookup
+    let vid = vendor_hex.trim_start_matches("0x").to_lowercase();
+    let did = device_hex.trim_start_matches("0x").to_lowercase();
+
+    let vendor_name = pci_ids.get(&vid).map(|(n, _)| n.as_str()).unwrap_or("");
+    let device_name = pci_ids
+        .get(&vid)
+        .and_then(|(_, devs)| devs.get(&did))
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    match (vendor_name.is_empty(), device_name.is_empty()) {
+        (false, false) => format!("{} {} [{}]", vendor_name, device_name, address),
+        (false, true) => format!("{} {} [{}]", vendor_name, did, address),
+        _ => format!("{} {} [{}]", vid, did, address),
+    }
+}
+
 /// Enumerate host PCI devices from /sys/bus/pci/devices.
 /// Skips PCI bridges and host bridges (class 0x060000–0x0607ff).
 pub fn list_pci_devices() -> Vec<HostdevInfo> {
     let pci_dir = Path::new("/sys/bus/pci/devices");
     let mut devices = Vec::new();
+    let pci_ids = load_pci_ids();
 
     let entries = match fs::read_dir(pci_dir) {
         Ok(e) => e,
@@ -54,7 +124,7 @@ pub fn list_pci_devices() -> Vec<HostdevInfo> {
         let vendor = read_sysfs_attr(&path, "vendor").unwrap_or_default();
         let device_id = read_sysfs_attr(&path, "device").unwrap_or_default();
 
-        let display_name = format!("{} [{} {}]", name, vendor, device_id);
+        let display_name = pci_display_name(&name, &vendor, &device_id, &pci_ids);
 
         devices.push(HostdevInfo {
             device_type: "pci".to_string(),

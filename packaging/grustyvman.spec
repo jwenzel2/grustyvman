@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.4
+Version:        1.5
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,7 +79,11 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
-* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.4-1
+* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.5-1
+- Use scrollable ListBox for host device selection so PCI device names are not truncated
+- Look up human-readable vendor/device names from pci.ids database
+
+* Mon Feb 23 2026 Jeremiah Wenzel <jeremiah@grustyvman> - 1.4-1
 - Fix viewer always picking up stale binary from viewer/target/ instead of workspace build
 - Add snapshot revert progress dialog
 - Reconnect SPICE display after snapshot revert
