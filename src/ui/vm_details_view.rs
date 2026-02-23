@@ -224,8 +224,8 @@ impl VmDetailsView {
                 let title = net.mac_address.clone().unwrap_or_else(|| "Unknown MAC".to_string());
                 row.set_title(&title);
                 let subtitle = format!(
-                    "Network: {} | Model: {}",
-                    net.source_network.as_deref().unwrap_or("N/A"),
+                    "{} | Model: {}",
+                    net.display_source(),
                     net.model_type.as_deref().unwrap_or("N/A")
                 );
                 row.set_subtitle(&subtitle);

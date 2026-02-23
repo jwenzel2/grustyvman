@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.5
+Version:        1.6
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,7 +79,10 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
-* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.5-1
+* %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.6-1
+- Fix network details view showing "Network: N/A" for bridge interfaces; now shows "Bridge: <name>"
+
+* Mon Feb 23 2026 Jeremiah Wenzel <jeremiah@grustyvman> - 1.5-1
 - Use scrollable ListBox for host device selection so PCI device names are not truncated
 - Look up human-readable vendor/device names from pci.ids database
 
