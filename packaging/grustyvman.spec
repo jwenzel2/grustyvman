@@ -1,7 +1,7 @@
 %global debug_package %{nil}
 
 Name:           grustyvman
-Version:        1.6
+Version:        1.7
 Release:        1%{?dist}
 Summary:        GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt
 
@@ -79,6 +79,9 @@ fi
 %{_datadir}/icons/hicolor/512x512/apps/grustyvman.png
 
 %changelog
+* Mon Feb 23 2026 Jeremiah Wenzel <jeremiah@grustyvman> - 1.7-1
+- Fix viewer silent crash caused by file descriptor leak in SPICE reconnect loop
+
 * %(date "+%a %b %d %Y") Jeremiah Wenzel <jeremiah@grustyvman> - 1.6-1
 - Fix network details view showing "Network: N/A" for bridge interfaces; now shows "Bridge: <name>"
 

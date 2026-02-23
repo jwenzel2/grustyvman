@@ -155,11 +155,13 @@ impl VmControl {
     where
         F: FnOnce(&Domain) -> Result<T, virt::error::Error>,
     {
-        let conn = Connect::open(Some(&self.uri))
+        let mut conn = Connect::open(Some(&self.uri))
             .map_err(|e| format!("libvirt connect: {e}"))?;
-        let domain = Domain::lookup_by_uuid_string(&conn, &self.uuid)
-            .map_err(|e| format!("domain lookup: {e}"))?;
-        f(&domain).map(|_| ()).map_err(|e| format!("{e}"))
+        let result = Domain::lookup_by_uuid_string(&conn, &self.uuid)
+            .map_err(|e| format!("domain lookup: {e}"))
+            .and_then(|domain| f(&domain).map(|_| ()).map_err(|e| format!("{e}")));
+        let _ = conn.close();
+        result
     }
 
     fn start(&self)        -> Result<(), String> { self.with_domain(|d| d.create()) }
@@ -188,35 +190,16 @@ impl VmControl {
         })
     }
 
-    fn spice_endpoint(&self) -> Result<Option<SpiceEndpoint>, String> {
-        let conn = Connect::open(Some(&self.uri))
-            .map_err(|e| format!("libvirt connect: {e}"))?;
-        let domain = Domain::lookup_by_uuid_string(&conn, &self.uuid)
-            .map_err(|e| format!("domain lookup: {e}"))?;
-
-        let Ok((state, _)) = domain.get_state() else {
-            return Ok(None);
-        };
-        if !matches!(state, 1 | 2 | 3 | 4) {
-            return Ok(None);
-        }
-
-        let xml = domain
-            .get_xml_desc(1)
-            .map_err(|e| format!("domain xml: {e}"))?;
-        Ok(parse_spice_endpoint(&xml))
-    }
-
     /// Returns `true` when the VM has an active SPICE server (running or
     /// paused).  Returns `true` on transient libvirt errors to avoid spurious
     /// "powered off" flashes.  Returns `false` when the domain is shut off,
     /// crashed, or cannot be found.
     fn is_active(&self) -> bool {
-        let conn = match Connect::open(Some(&self.uri)) {
+        let mut conn = match Connect::open(Some(&self.uri)) {
             Ok(c) => c,
             Err(_) => return true, // treat connection error as "still up"
         };
-        match Domain::lookup_by_uuid_string(&conn, &self.uuid) {
+        let result = match Domain::lookup_by_uuid_string(&conn, &self.uuid) {
             Ok(domain) => match domain.get_state() {
                 // VIR_DOMAIN_RUNNING=1, VIR_DOMAIN_BLOCKED=2,
                 // VIR_DOMAIN_PAUSED=3, VIR_DOMAIN_SHUTDOWN=4 (still has SPICE)
@@ -224,7 +207,9 @@ impl VmControl {
                 Err(_) => true,
             },
             Err(_) => false, // domain gone → treat as shutoff
-        }
+        };
+        let _ = conn.close();
+        result
     }
 }
 
@@ -355,11 +340,34 @@ fn schedule_reconnect(viewer_addr: usize, endpoint: SpiceEndpoint) {
 
 fn wait_for_spice_endpoint(vm: &VmControl, timeout_secs: u64) -> Option<SpiceEndpoint> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    // Keep a single persistent connection for all retries.  Opening and closing a
+    // new libvirt connection on every iteration (up to 60×) registers GLib I/O
+    // event sources that are cleaned up asynchronously by the GTK main loop; rapid
+    // accumulation can exhaust the process FD limit before cleanup catches up.
+    let mut conn: Option<Connect> = Connect::open(Some(&vm.uri)).ok();
     loop {
-        if let Ok(Some(endpoint)) = vm.spice_endpoint() {
-            return Some(endpoint);
+        if conn.is_none() {
+            conn = Connect::open(Some(&vm.uri)).ok();
         }
+        let mut lookup_failed = false;
+        if let Some(c) = conn.as_mut() {
+            match Domain::lookup_by_uuid_string(c, &vm.uuid) {
+                Ok(domain) => {
+                    let ep = domain.get_state().ok()
+                        .filter(|(s, _)| matches!(s, 1 | 2 | 3 | 4))
+                        .and_then(|_| domain.get_xml_desc(1).ok())
+                        .and_then(|xml| parse_spice_endpoint(&xml));
+                    if ep.is_some() {
+                        if let Some(mut c) = conn { let _ = c.close(); }
+                        return ep;
+                    }
+                }
+                Err(_) => lookup_failed = true, // connection stale; reopen next iteration
+            }
+        }
+        if lookup_failed { conn = None; }
         if std::time::Instant::now() >= deadline {
+            if let Some(mut c) = conn { let _ = c.close(); }
             return None;
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -601,8 +609,44 @@ fn main() {
     std::thread::spawn(move || {
         let poll_vm = VmControl { uri: poll_uri, uuid: poll_uuid };
 
+        // Keep a single persistent libvirt connection for the life of this
+        // thread.  Re-opening and closing a connection every 2 s leaks file
+        // descriptors (virConnectOpen creates sockets + GLib event sources that
+        // aren't freed until the connection's reference count reaches zero, and
+        // the virt crate's Connect has no Drop impl).  A persistent connection
+        // is also faster and is the idiomatic libvirt usage pattern.
+        let mut conn: Option<Connect> = Connect::open(Some(&poll_vm.uri))
+            .map_err(|e| eprintln!("grustyvman-viewer: initial poll conn failed: {e}"))
+            .ok();
+
+        // Helper: check whether the VM is active using the persistent connection.
+        // Returns true on any transient error so we don't spuriously show
+        // "powered off" when libvirtd hiccups.
+        let is_active_conn = |conn: &mut Option<Connect>| -> bool {
+            // Reopen the connection if it was previously lost.
+            if conn.is_none() {
+                *conn = Connect::open(Some(&poll_vm.uri)).ok();
+            }
+            match conn.as_mut() {
+                None => true, // connection error → assume still up
+                Some(c) => match Domain::lookup_by_uuid_string(c, &poll_vm.uuid) {
+                    Ok(domain) => match domain.get_state() {
+                        Ok((state, _)) => matches!(state, 1 | 2 | 3 | 4),
+                        Err(_) => true,
+                    },
+                    Err(e) => {
+                        // Could be the domain is gone OR the connection is stale.
+                        // Drop the connection so we reopen next poll.
+                        eprintln!("grustyvman-viewer: domain lookup failed: {e}");
+                        *conn = None;
+                        false
+                    }
+                },
+            }
+        };
+
         // Seed the initial state so we don't fire spuriously on startup.
-        let mut was_active = poll_vm.is_active();
+        let mut was_active = is_active_conn(&mut conn);
 
         // Brief initial delay to let the VM / SPICE server settle before
         // we start watching for transitions.
@@ -610,7 +654,7 @@ fn main() {
 
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let now_active = poll_vm.is_active();
+            let now_active = is_active_conn(&mut conn);
 
             if was_active && !now_active {
                 // VM just became inactive — show powered-off page.
