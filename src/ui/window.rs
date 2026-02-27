@@ -63,6 +63,7 @@ mod imp {
         pub btn_settings: gtk::Button,
         pub btn_rename: gtk::Button,
         pub btn_clone: gtk::Button,
+        pub btn_overflow: gtk::MenuButton,
         // Perf sampling state
         pub perf_timer_id: RefCell<Option<glib::SourceId>>,
         pub last_perf_sample: RefCell<Option<(Instant, RawPerfSample)>>,
@@ -111,6 +112,7 @@ mod imp {
                 btn_settings: gtk::Button::new(),
                 btn_rename: gtk::Button::new(),
                 btn_clone: gtk::Button::new(),
+                btn_overflow: gtk::MenuButton::new(),
                 perf_timer_id: RefCell::new(None),
                 last_perf_sample: RefCell::new(None),
                 disk_targets: RefCell::new(Vec::new()),
@@ -345,11 +347,22 @@ impl Window {
         btn_clone.set_tooltip_text(Some("Clone VM"));
         btn_clone.set_sensitive(false);
 
+        // Overflow menu with Backup/Restore
+        let btn_overflow = &imp.btn_overflow;
+        btn_overflow.set_icon_name("view-more-symbolic");
+        btn_overflow.set_tooltip_text(Some("More Actions"));
+        btn_overflow.set_sensitive(false);
+        let overflow_menu = gio::Menu::new();
+        overflow_menu.append(Some("Backup VM…"), Some("win.backup-vm"));
+        overflow_menu.append(Some("Restore VM…"), Some("win.restore-vm"));
+        btn_overflow.set_menu_model(Some(&overflow_menu));
+
         content_header.pack_start(btn_start);
         content_header.pack_start(btn_pause);
         content_header.pack_start(btn_stop);
         content_header.pack_start(btn_force_stop);
         content_header.pack_start(btn_reboot);
+        content_header.pack_end(btn_overflow);
         content_header.pack_end(btn_settings);
         content_header.pack_end(btn_delete);
         content_header.pack_end(btn_rename);
@@ -674,6 +687,7 @@ impl Window {
         });
 
         self.connect_action_buttons();
+        self.connect_backup_actions();
         self.connect_pool_action_buttons();
         self.connect_network_action_buttons();
         self.connect_snapshot_callbacks();
@@ -712,6 +726,7 @@ impl Window {
         imp.btn_settings.set_visible(visible);
         imp.btn_rename.set_visible(visible);
         imp.btn_clone.set_visible(visible);
+        imp.btn_overflow.set_visible(visible);
         imp.view_switcher_title.set_visible(visible);
     }
 
@@ -1133,6 +1148,9 @@ impl Window {
         imp.btn_settings.set_sensitive(settings);
         imp.btn_rename.set_sensitive(rename);
         imp.btn_clone.set_sensitive(clone);
+
+        // Overflow menu: visible when a VM is selected
+        imp.btn_overflow.set_sensitive(state.is_some());
     }
 
     fn load_vm_details(&self, uuid: &str) {
@@ -2206,6 +2224,103 @@ impl Window {
                         }
                         Err(e) => {
                             win.show_toast(&format!("Clone failed: {e}"));
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    // --- Backup / Restore ---
+
+    fn connect_backup_actions(&self) {
+        use gio::prelude::ActionMapExt;
+
+        let win = self.downgrade();
+        let backup_action = gio::SimpleAction::new("backup-vm", None);
+        backup_action.connect_activate(move |_, _| {
+            if let Some(win) = win.upgrade() {
+                win.show_backup_dialog();
+            }
+        });
+        self.add_action(&backup_action);
+
+        let win = self.downgrade();
+        let restore_action = gio::SimpleAction::new("restore-vm", None);
+        restore_action.connect_activate(move |_, _| {
+            if let Some(win) = win.upgrade() {
+                win.show_restore_dialog();
+            }
+        });
+        self.add_action(&restore_action);
+    }
+
+    fn show_backup_dialog(&self) {
+        let uuid = match self.imp().selected_uuid.borrow().clone() {
+            Some(u) => u,
+            None => return,
+        };
+        let uri = self.imp().connection_uri.borrow().clone();
+        let vm_name = backend::domain::get_domain_name(&uri, &uuid).unwrap_or_default();
+        let win = self.downgrade();
+
+        crate::ui::backup_vm_dialog::show_backup_vm_dialog(
+            self.upcast_ref(),
+            &vm_name,
+            move |dest_path| {
+                let Some(win) = win.upgrade() else { return };
+                let uri2 = win.imp().connection_uri.borrow().clone();
+                let uuid2 = uuid.clone();
+
+                win.show_toast("Backing up VM… this may take a while");
+
+                let rx = spawn_blocking(move || {
+                    backend::backup::backup_vm(&uri2, &uuid2, &dest_path)
+                });
+
+                let win2 = win.downgrade();
+                glib::spawn_future_local(async move {
+                    let Ok(result) = rx.recv().await else { return };
+                    let Some(win) = win2.upgrade() else { return };
+                    match result {
+                        Ok(()) => {
+                            win.show_toast("VM backed up successfully");
+                        }
+                        Err(e) => {
+                            win.show_toast(&format!("Backup failed: {e}"));
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    fn show_restore_dialog(&self) {
+        let win = self.downgrade();
+
+        crate::ui::backup_vm_dialog::show_restore_vm_dialog(
+            self.upcast_ref(),
+            move |archive_path| {
+                let Some(win) = win.upgrade() else { return };
+                let uri = win.imp().connection_uri.borrow().clone();
+
+                win.show_toast("Restoring VM… this may take a while");
+
+                let rx = spawn_blocking(move || {
+                    backend::backup::restore_vm(&uri, &archive_path)
+                });
+
+                let win2 = win.downgrade();
+                glib::spawn_future_local(async move {
+                    let Ok(result) = rx.recv().await else { return };
+                    let Some(win) = win2.upgrade() else { return };
+                    match result {
+                        Ok(name) => {
+                            win.show_toast(&format!("VM '{name}' restored successfully"));
+                            win.refresh_vm_list();
+                        }
+                        Err(e) => {
+                            win.show_toast(&format!("Restore failed: {e}"));
                         }
                     }
                 });

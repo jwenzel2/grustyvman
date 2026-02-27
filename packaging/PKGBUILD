@@ -1,0 +1,38 @@
+# Maintainer: Jeremiah Wenzel <jeremiah@grustyvman>
+pkgname=grustyvman
+pkgver=1.7.0
+pkgrel=1
+pkgdesc="GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt"
+arch=('x86_64')
+url="https://github.com/jwenzel2/grustyvman"
+license=('MIT')
+depends=('gtk4' 'libadwaita' 'libvirt' 'spice-gtk')
+makedepends=('rust' 'cargo' 'gcc' 'pkg-config' 'imagemagick')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    cargo build --release --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm755 target/release/grustyvman \
+        "$pkgdir/usr/bin/grustyvman"
+    install -Dm755 target/release/grustyvman-viewer \
+        "$pkgdir/usr/bin/grustyvman-viewer"
+
+    install -Dm644 packaging/com.github.grustyvman.desktop \
+        "$pkgdir/usr/share/applications/com.github.grustyvman.desktop"
+    install -Dm644 packaging/grustyvman-viewer.desktop \
+        "$pkgdir/usr/share/applications/grustyvman-viewer.desktop"
+
+    for size in 256 512; do
+        install -dm755 "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps"
+        magick icon.png -resize "${size}x${size}" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/grustyvman.png"
+    done
+}

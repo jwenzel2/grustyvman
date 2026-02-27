@@ -1,4 +1,5 @@
 pub mod add_disk_dialog;
+pub mod backup_vm_dialog;
 pub mod change_network_source_dialog;
 pub mod add_hostdev_dialog;
 pub mod add_network_dialog;

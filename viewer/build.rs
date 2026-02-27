@@ -17,8 +17,11 @@ fn main() {
         );
 
     // 1. Compile the C helper into a static archive (libspice_helpers.a).
+    //    Force -fno-lto: Arch Linux's makepkg sets CFLAGS=-flto=auto, which
+    //    causes GCC to emit LTO IR that ld.lld cannot link against.
     let mut build = cc::Build::new();
     build.file("src/spice_helpers.c");
+    build.flag("-fno-lto");
     for path in &spice_gtk.include_paths {
         build.include(path);
     }

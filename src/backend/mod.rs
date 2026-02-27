@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod connection;
 pub mod domain;
 pub mod domain_xml;
