@@ -35,6 +35,49 @@ where
     rx
 }
 
+/// Create a modal progress dialog with a progress bar and status label.
+/// Returns (dialog, progress_bar, status_label).
+fn create_progress_dialog(
+    parent: &Window,
+    title: &str,
+) -> (gtk::Window, gtk::Label) {
+    let dialog = gtk::Window::new();
+    dialog.set_title(Some(title));
+    dialog.set_default_size(380, -1);
+    dialog.set_decorated(false);
+    dialog.set_modal(true);
+    dialog.set_transient_for(Some(parent));
+    dialog.set_deletable(false);
+
+    let toolbar_view = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    header.set_show_end_title_buttons(false);
+    header.set_show_start_title_buttons(false);
+    toolbar_view.add_top_bar(&header);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    content.set_margin_top(24);
+    content.set_margin_bottom(24);
+    content.set_margin_start(24);
+    content.set_margin_end(24);
+
+    let spinner = gtk::Spinner::new();
+    spinner.set_spinning(true);
+    spinner.set_height_request(32);
+    content.append(&spinner);
+
+    let status_label = gtk::Label::new(Some("Preparing..."));
+    status_label.set_xalign(0.5);
+    status_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    content.append(&status_label);
+
+    toolbar_view.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar_view));
+    dialog.present();
+
+    (dialog, status_label)
+}
+
 mod imp {
     use super::*;
     use std::time::Instant;
@@ -204,6 +247,11 @@ impl Window {
         let new_vm_btn = gtk::Button::from_icon_name("list-add-symbolic");
         new_vm_btn.set_tooltip_text(Some("New Virtual Machine"));
         sidebar_header.pack_end(&new_vm_btn);
+
+        let restore_btn = gtk::Button::from_icon_name("document-open-symbolic");
+        restore_btn.set_tooltip_text(Some("Restore VM from Backup"));
+        restore_btn.set_action_name(Some("win.restore-vm"));
+        sidebar_header.pack_end(&restore_btn);
 
         sidebar_toolbar.add_top_bar(&sidebar_header);
 
@@ -2272,22 +2320,48 @@ impl Window {
                 let uri2 = win.imp().connection_uri.borrow().clone();
                 let uuid2 = uuid.clone();
 
-                win.show_toast("Backing up VM… this may take a while");
+                let (progress_dialog, status_label) =
+                    create_progress_dialog(&win, "Backing Up VM");
 
-                let rx = spawn_blocking(move || {
-                    backend::backup::backup_vm(&uri2, &uuid2, &dest_path)
+                let (ptx, prx) = async_channel::unbounded::<(f64, String)>();
+                let (rtx, rrx) = async_channel::bounded::<Result<(), crate::error::AppError>>(1);
+
+                std::thread::spawn(move || {
+                    let result = backend::backup::backup_vm(&uri2, &uuid2, &dest_path, &move |frac, msg| {
+                        let _ = ptx.send_blocking((frac, msg.to_string()));
+                    });
+                    let _ = rtx.send_blocking(result);
                 });
 
                 let win2 = win.downgrade();
+                let dialog_ref = progress_dialog.downgrade();
                 glib::spawn_future_local(async move {
-                    let Ok(result) = rx.recv().await else { return };
-                    let Some(win) = win2.upgrade() else { return };
-                    match result {
-                        Ok(()) => {
-                            win.show_toast("VM backed up successfully");
+                    loop {
+                        let update = prx.try_recv();
+                        match update {
+                            Ok((_frac, msg)) => {
+                                status_label.set_label(&msg);
+                            }
+                            Err(async_channel::TryRecvError::Empty) => {}
+                            Err(async_channel::TryRecvError::Closed) => break,
                         }
-                        Err(e) => {
-                            win.show_toast(&format!("Backup failed: {e}"));
+                        if let Ok(result) = rrx.try_recv() {
+                            if let Some(d) = dialog_ref.upgrade() { d.close(); }
+                            let Some(win) = win2.upgrade() else { return };
+                            match result {
+                                Ok(()) => win.show_toast("VM backed up successfully"),
+                                Err(e) => win.show_toast(&format!("Backup failed: {e}")),
+                            }
+                            return;
+                        }
+                        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+                    }
+                    if let Ok(result) = rrx.recv().await {
+                        if let Some(d) = dialog_ref.upgrade() { d.close(); }
+                        let Some(win) = win2.upgrade() else { return };
+                        match result {
+                            Ok(()) => win.show_toast("VM backed up successfully"),
+                            Err(e) => win.show_toast(&format!("Backup failed: {e}")),
                         }
                     }
                 });
@@ -2304,23 +2378,54 @@ impl Window {
                 let Some(win) = win.upgrade() else { return };
                 let uri = win.imp().connection_uri.borrow().clone();
 
-                win.show_toast("Restoring VM… this may take a while");
+                let (progress_dialog, status_label) =
+                    create_progress_dialog(&win, "Restoring VM");
 
-                let rx = spawn_blocking(move || {
-                    backend::backup::restore_vm(&uri, &archive_path)
+                let (ptx, prx) = async_channel::unbounded::<(f64, String)>();
+                let (rtx, rrx) = async_channel::bounded::<Result<String, crate::error::AppError>>(1);
+
+                std::thread::spawn(move || {
+                    let result = backend::backup::restore_vm(&uri, &archive_path, &move |frac, msg| {
+                        let _ = ptx.send_blocking((frac, msg.to_string()));
+                    });
+                    let _ = rtx.send_blocking(result);
                 });
 
                 let win2 = win.downgrade();
+                let dialog_ref = progress_dialog.downgrade();
                 glib::spawn_future_local(async move {
-                    let Ok(result) = rx.recv().await else { return };
-                    let Some(win) = win2.upgrade() else { return };
-                    match result {
-                        Ok(name) => {
-                            win.show_toast(&format!("VM '{name}' restored successfully"));
-                            win.refresh_vm_list();
+                    loop {
+                        let update = prx.try_recv();
+                        match update {
+                            Ok((_frac, msg)) => {
+                                status_label.set_label(&msg);
+                            }
+                            Err(async_channel::TryRecvError::Empty) => {}
+                            Err(async_channel::TryRecvError::Closed) => break,
                         }
-                        Err(e) => {
-                            win.show_toast(&format!("Restore failed: {e}"));
+                        if let Ok(result) = rrx.try_recv() {
+                            if let Some(d) = dialog_ref.upgrade() { d.close(); }
+                            let Some(win) = win2.upgrade() else { return };
+                            match result {
+                                Ok(name) => {
+                                    win.show_toast(&format!("VM '{name}' restored successfully"));
+                                    win.refresh_vm_list();
+                                }
+                                Err(e) => win.show_toast(&format!("Restore failed: {e}")),
+                            }
+                            return;
+                        }
+                        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+                    }
+                    if let Ok(result) = rrx.recv().await {
+                        if let Some(d) = dialog_ref.upgrade() { d.close(); }
+                        let Some(win) = win2.upgrade() else { return };
+                        match result {
+                            Ok(name) => {
+                                win.show_toast(&format!("VM '{name}' restored successfully"));
+                                win.refresh_vm_list();
+                            }
+                            Err(e) => win.show_toast(&format!("Restore failed: {e}")),
                         }
                     }
                 });

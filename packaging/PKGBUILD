@@ -1,6 +1,6 @@
 # Maintainer: Jeremiah Wenzel <jeremiah@grustyvman>
 pkgname=grustyvman
-pkgver=1.7.0
+pkgver=1.8.0
 pkgrel=1
 pkgdesc="GTK4/Libadwaita virtual machine manager for QEMU/KVM via libvirt"
 arch=('x86_64')

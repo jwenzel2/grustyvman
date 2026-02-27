@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use virt::domain::Domain;
 use virt::domain_snapshot::DomainSnapshot;
 use virt::storage_pool::StoragePool;
@@ -10,9 +11,29 @@ use crate::backend::domain::{get_domain_xml, with_domain};
 use crate::backend::domain_xml::extract_disk_paths;
 use crate::error::AppError;
 
+/// Progress callback: (fraction 0.0..1.0, status message).
+pub type ProgressFn = dyn Fn(f64, &str) + Send + Sync;
+
+/// Check if pigz is available for parallel gzip.
+fn has_pigz() -> bool {
+    std::process::Command::new("pigz")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Backup a shut-off VM's XML, disk images, and snapshot metadata into a `.tar.gz` archive.
 /// Disk images are exported via the libvirt stream API so no direct filesystem access is needed.
-pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError> {
+/// Multiple disks are downloaded in parallel using separate libvirt connections.
+pub fn backup_vm(
+    uri: &str,
+    uuid: &str,
+    dest_path: &str,
+    progress: &ProgressFn,
+) -> Result<(), AppError> {
+    progress(0.0, "Checking VM state...");
+
     // Ensure VM is shut off
     let state = with_domain(uri, uuid, |domain| {
         let info = domain.get_info()?;
@@ -23,6 +44,8 @@ pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError>
             "VM must be shut off before backup".to_string(),
         ));
     }
+
+    progress(0.02, "Reading VM configuration...");
 
     let xml = get_domain_xml(uri, uuid)?;
     let disk_paths = extract_disk_paths(&xml);
@@ -39,8 +62,9 @@ pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError>
         Ok(result)
     })?;
 
-    // Get domain name for manifest
     let vm_name = crate::backend::domain::get_domain_name(uri, uuid)?;
+
+    progress(0.05, "Preparing backup directory...");
 
     // Create temp directory
     let tmp_dir = tempdir()?;
@@ -64,8 +88,9 @@ pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError>
         )?;
     }
 
-    // Download disk images via libvirt stream API
-    let conn = get_conn(uri)?;
+    // Download disk images in parallel via libvirt stream API
+    // Each thread gets its own libvirt connection since connections aren't Send
+    let num_disks = disk_paths.len();
     let disk_filenames: Vec<String> = disk_paths
         .iter()
         .map(|p| {
@@ -76,17 +101,51 @@ pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError>
                 .to_string()
         })
         .collect();
-    for path in &disk_paths {
-        let fname = Path::new(path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let dest = base.join("disks").join(&fname);
-        download_volume(&conn, path, &dest)?;
+
+    if num_disks > 0 {
+        let completed = AtomicUsize::new(0);
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = disk_paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| {
+                    let fname = &disk_filenames[i];
+                    let dest = base.join("disks").join(fname);
+                    let uri = uri;
+                    let completed = &completed;
+                    s.spawn(move || {
+                        let conn = get_conn(uri)?;
+                        progress(
+                            0.05,
+                            &format!("Exporting disk {}/{}: {}", i + 1, num_disks, fname),
+                        );
+                        download_volume(&conn, path, &dest, |_frac| {
+                            // Individual disk progress not meaningful in parallel mode;
+                            // report which disks are done instead
+                        })?;
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        let frac = 0.05 + 0.80 * (done as f64 / num_disks as f64);
+                        progress(
+                            frac,
+                            &format!("Exported disk {}/{}: {}", done, num_disks, fname),
+                        );
+                        Ok::<(), AppError>(())
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().map_err(|_| {
+                    AppError::Libvirt("Disk export thread panicked".to_string())
+                })??;
+            }
+            Ok::<(), AppError>(())
+        })?;
     }
 
-    // Write manifest.json (hand-written to avoid serde dependency)
+    // Write manifest.json
+    progress(0.85, "Writing manifest...");
     let disks_json: Vec<String> = disk_filenames
         .iter()
         .map(|d| format!("\"{}\"", escape_json(d)))
@@ -104,16 +163,30 @@ pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError>
     );
     std::fs::write(base.join("manifest.json"), &manifest)?;
 
-    // Create tar.gz
-    let output = std::process::Command::new("tar")
-        .args([
-            "czf",
-            dest_path,
-            "-C",
-            &tmp_dir.to_string_lossy(),
-            "vm-backup",
-        ])
-        .output()?;
+    // Create tar.gz — use pigz for parallel compression if available
+    progress(0.88, "Compressing archive...");
+    let output = if has_pigz() {
+        std::process::Command::new("tar")
+            .args([
+                "cf",
+                dest_path,
+                "--use-compress-program=pigz",
+                "-C",
+                &tmp_dir.to_string_lossy(),
+                "vm-backup",
+            ])
+            .output()?
+    } else {
+        std::process::Command::new("tar")
+            .args([
+                "czf",
+                dest_path,
+                "-C",
+                &tmp_dir.to_string_lossy(),
+                "vm-backup",
+            ])
+            .output()?
+    };
     if !output.status.success() {
         return Err(AppError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -122,20 +195,41 @@ pub fn backup_vm(uri: &str, uuid: &str, dest_path: &str) -> Result<(), AppError>
     }
 
     // Clean up
+    progress(0.98, "Cleaning up...");
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
+    progress(1.0, "Backup complete");
     Ok(())
 }
 
 /// Restore a VM from a `.tar.gz` backup archive. Returns the new VM name.
 /// Disk images are uploaded via the libvirt stream API so no direct filesystem access is needed.
-pub fn restore_vm(uri: &str, archive_path: &str) -> Result<String, AppError> {
+/// Multiple disks are uploaded in parallel using separate libvirt connections.
+pub fn restore_vm(
+    uri: &str,
+    archive_path: &str,
+    progress: &ProgressFn,
+) -> Result<String, AppError> {
+    progress(0.0, "Extracting archive...");
+
     let tmp_dir = tempdir()?;
 
-    // Extract archive
-    let output = std::process::Command::new("tar")
-        .args(["xzf", archive_path, "-C", &tmp_dir.to_string_lossy()])
-        .output()?;
+    // Extract archive — use pigz for parallel decompression if available
+    let output = if has_pigz() {
+        std::process::Command::new("tar")
+            .args([
+                "xf",
+                archive_path,
+                "--use-compress-program=pigz",
+                "-C",
+                &tmp_dir.to_string_lossy(),
+            ])
+            .output()?
+    } else {
+        std::process::Command::new("tar")
+            .args(["xzf", archive_path, "-C", &tmp_dir.to_string_lossy()])
+            .output()?
+    };
     if !output.status.success() {
         return Err(AppError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -154,6 +248,8 @@ pub fn restore_vm(uri: &str, archive_path: &str) -> Result<String, AppError> {
         )));
     }
 
+    progress(0.05, "Reading VM configuration...");
+
     // Read domain XML
     let xml = std::fs::read_to_string(base.join("domain.xml"))?;
     let disk_paths = extract_disk_paths(&xml);
@@ -165,22 +261,73 @@ pub fn restore_vm(uri: &str, archive_path: &str) -> Result<String, AppError> {
     // Find target storage pool
     let conn = get_conn(uri)?;
     let pool = find_active_pool(&conn)?;
+    let pool_name = pool.get_name()?;
 
-    // Upload disk images via libvirt stream API and build disk path map
-    let mut disk_map: Vec<(String, String)> = Vec::new();
-    for old_path in &disk_paths {
-        let fname = Path::new(old_path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let src = base.join("disks").join(&fname);
+    // Prepare list of disks to upload
+    let num_disks = disk_paths.len();
+    let upload_tasks: Vec<(usize, String, String, PathBuf)> = disk_paths
+        .iter()
+        .enumerate()
+        .filter_map(|(i, old_path)| {
+            let fname = Path::new(old_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let src = base.join("disks").join(&fname);
+            if src.exists() {
+                Some((i, old_path.clone(), fname, src))
+            } else {
+                None
+            }
+        })
+        .collect();
 
-        if src.exists() {
-            let new_path = upload_volume_to_pool(&conn, &pool, &src, &fname)?;
-            disk_map.push((old_path.clone(), new_path));
-        }
-    }
+    // Upload disk images in parallel
+    let disk_map: Vec<(String, String)> = if !upload_tasks.is_empty() {
+        let completed = AtomicUsize::new(0);
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = upload_tasks
+                .iter()
+                .map(|(i, old_path, fname, src)| {
+                    let completed = &completed;
+                    let pool_name = &pool_name;
+                    s.spawn(move || {
+                        // Each thread gets its own connection and pool handle
+                        let conn = get_conn(uri)?;
+                        let pool = StoragePool::lookup_by_name(&conn, pool_name)?;
+                        progress(
+                            0.08,
+                            &format!("Importing disk {}/{}: {}", i + 1, num_disks, fname),
+                        );
+                        let new_path =
+                            upload_volume_to_pool(&conn, &pool, src, fname, |_frac| {})?;
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        let frac = 0.08 + 0.80 * (done as f64 / num_disks as f64);
+                        progress(
+                            frac,
+                            &format!("Imported disk {}/{}: {}", done, num_disks, fname),
+                        );
+                        Ok::<(String, String), AppError>((old_path.clone(), new_path))
+                    })
+                })
+                .collect();
+
+            let mut map = Vec::new();
+            for handle in handles {
+                let pair = handle.join().map_err(|_| {
+                    AppError::Libvirt("Disk import thread panicked".to_string())
+                })??;
+                map.push(pair);
+            }
+            Ok::<Vec<(String, String)>, AppError>(map)
+        })?
+    } else {
+        Vec::new()
+    };
+
+    progress(0.90, "Defining VM...");
 
     // Determine final VM name (avoid conflicts)
     let final_name = unique_vm_name(&conn, &vm_name)?;
@@ -193,6 +340,7 @@ pub fn restore_vm(uri: &str, archive_path: &str) -> Result<String, AppError> {
     let domain = Domain::define_xml(&conn, &new_xml)?;
 
     // Restore snapshot metadata
+    progress(0.93, "Restoring snapshots...");
     let snap_dir = base.join("snapshots");
     if snap_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&snap_dir) {
@@ -215,11 +363,13 @@ pub fn restore_vm(uri: &str, archive_path: &str) -> Result<String, AppError> {
     }
 
     // Clean up
+    progress(0.97, "Cleaning up...");
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     // Refresh storage pools so libvirt sees the new volumes
     refresh_pools(&conn);
 
+    progress(1.0, "Restore complete");
     Ok(final_name)
 }
 
@@ -228,6 +378,7 @@ fn download_volume(
     conn: &virt::connect::Connect,
     vol_path: &str,
     dest: &Path,
+    on_progress: impl Fn(f64),
 ) -> Result<(), AppError> {
     use std::io::Write;
 
@@ -242,6 +393,7 @@ fn download_volume(
     let recv_result: Result<(), AppError> = (|| {
         let mut file = std::fs::File::create(dest)?;
         let mut buf = vec![0u8; 256 * 1024];
+        let mut received: u64 = 0;
         loop {
             let n = stream
                 .recv(&mut buf)
@@ -250,6 +402,10 @@ fn download_volume(
                 break;
             }
             file.write_all(&buf[..n])?;
+            received += n as u64;
+            if capacity > 0 {
+                on_progress(received as f64 / capacity as f64);
+            }
         }
         file.flush()?;
         Ok(())
@@ -276,6 +432,7 @@ fn upload_volume_to_pool(
     pool: &StoragePool,
     src: &Path,
     vol_name: &str,
+    on_progress: impl Fn(f64),
 ) -> Result<String, AppError> {
     use std::io::Read;
 
@@ -304,6 +461,7 @@ fn upload_volume_to_pool(
     let send_result: Result<(), AppError> = (|| {
         let mut file = std::fs::File::open(src)?;
         let mut buf = vec![0u8; 256 * 1024];
+        let mut sent_total: u64 = 0;
         loop {
             let n = file.read(&mut buf)?;
             if n == 0 {
@@ -315,6 +473,10 @@ fn upload_volume_to_pool(
                     .send(&buf[sent..n])
                     .map_err(|e| AppError::Libvirt(e.to_string()))?;
                 sent += s;
+            }
+            sent_total += n as u64;
+            if file_size > 0 {
+                on_progress(sent_total as f64 / file_size as f64);
             }
         }
         Ok(())
@@ -361,10 +523,10 @@ fn find_active_pool(
         .ok_or_else(|| AppError::Libvirt("No active storage pool found".to_string()))
 }
 
-/// Create a temporary directory under /tmp.
+/// Create a temporary directory under /var/tmp (survives reboots, more space than /tmp).
 fn tempdir() -> Result<PathBuf, std::io::Error> {
     let name = format!("grustyvman-backup-{}", std::process::id());
-    let path = std::env::temp_dir().join(name);
+    let path = PathBuf::from("/var/tmp").join(name);
     std::fs::create_dir_all(&path)?;
     Ok(path)
 }
