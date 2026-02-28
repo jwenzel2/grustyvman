@@ -427,7 +427,7 @@ fn download_volume(
 
 /// Upload a local file into a storage pool as a new volume via the libvirt stream API.
 /// Returns the volume's path within the pool.
-fn upload_volume_to_pool(
+pub(crate) fn upload_volume_to_pool(
     conn: &virt::connect::Connect,
     pool: &StoragePool,
     src: &Path,
@@ -576,7 +576,7 @@ fn parse_manifest_name(json: &str) -> String {
 }
 
 /// If a VM with the given name already exists, append "-restored" (or "-restored-N").
-fn unique_vm_name(
+pub(crate) fn unique_vm_name(
     conn: &virt::connect::Connect,
     base_name: &str,
 ) -> Result<String, AppError> {

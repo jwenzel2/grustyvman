@@ -4,6 +4,7 @@ pub mod change_network_source_dialog;
 pub mod add_hostdev_dialog;
 pub mod add_network_dialog;
 pub mod clone_vm_dialog;
+pub mod convert_vm_dialog;
 pub mod rename_vm_dialog;
 pub mod host_details_view;
 pub mod create_network_dialog;

@@ -253,6 +253,14 @@ impl Window {
         restore_btn.set_action_name(Some("win.restore-vm"));
         sidebar_header.pack_end(&restore_btn);
 
+        let sidebar_menu_btn = gtk::MenuButton::new();
+        sidebar_menu_btn.set_icon_name("open-menu-symbolic");
+        sidebar_menu_btn.set_tooltip_text(Some("More Options"));
+        let sidebar_menu = gio::Menu::new();
+        sidebar_menu.append(Some("Import VMware VM…"), Some("win.convert-vmware-vm"));
+        sidebar_menu_btn.set_menu_model(Some(&sidebar_menu));
+        sidebar_header.pack_end(&sidebar_menu_btn);
+
         sidebar_toolbar.add_top_bar(&sidebar_header);
 
         // Sidebar toggle buttons (VMs / Storage)
@@ -2301,6 +2309,15 @@ impl Window {
             }
         });
         self.add_action(&restore_action);
+
+        let win = self.downgrade();
+        let convert_action = gio::SimpleAction::new("convert-vmware-vm", None);
+        convert_action.connect_activate(move |_, _| {
+            if let Some(win) = win.upgrade() {
+                win.show_convert_vmware_dialog();
+            }
+        });
+        self.add_action(&convert_action);
     }
 
     fn show_backup_dialog(&self) {
@@ -2426,6 +2443,88 @@ impl Window {
                                 win.refresh_vm_list();
                             }
                             Err(e) => win.show_toast(&format!("Restore failed: {e}")),
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    fn show_convert_vmware_dialog(&self) {
+        let uri = self.imp().connection_uri.borrow().clone();
+
+        // Gather pool names and network names for the dialog
+        let pool_names: Vec<String> = backend::storage::list_all_pools(&uri)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.active)
+            .map(|p| p.name)
+            .collect();
+        let network_names: Vec<String> = backend::network::list_all_networks(&uri)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| n.active)
+            .map(|n| n.name)
+            .collect();
+
+        let win = self.downgrade();
+
+        crate::ui::convert_vm_dialog::show_convert_vm_file_dialog(
+            self.upcast_ref(),
+            pool_names,
+            network_names,
+            move |params| {
+                let Some(win) = win.upgrade() else { return };
+                let uri = win.imp().connection_uri.borrow().clone();
+
+                let (progress_dialog, status_label) =
+                    create_progress_dialog(&win, "Importing VMware VM");
+
+                let (ptx, prx) = async_channel::unbounded::<(f64, String)>();
+                let (rtx, rrx) = async_channel::bounded::<Result<String, crate::error::AppError>>(1);
+
+                std::thread::spawn(move || {
+                    let result = backend::vmware::convert_vmware_vm(&uri, &params, &move |frac, msg| {
+                        let _ = ptx.send_blocking((frac, msg.to_string()));
+                    });
+                    let _ = rtx.send_blocking(result);
+                });
+
+                let win2 = win.downgrade();
+                let dialog_ref = progress_dialog.downgrade();
+                glib::spawn_future_local(async move {
+                    loop {
+                        let update = prx.try_recv();
+                        match update {
+                            Ok((_frac, msg)) => {
+                                status_label.set_label(&msg);
+                            }
+                            Err(async_channel::TryRecvError::Empty) => {}
+                            Err(async_channel::TryRecvError::Closed) => break,
+                        }
+                        if let Ok(result) = rrx.try_recv() {
+                            if let Some(d) = dialog_ref.upgrade() { d.close(); }
+                            let Some(win) = win2.upgrade() else { return };
+                            match result {
+                                Ok(name) => {
+                                    win.show_toast(&format!("VM '{name}' imported successfully"));
+                                    win.refresh_vm_list();
+                                }
+                                Err(e) => win.show_toast(&format!("Import failed: {e}")),
+                            }
+                            return;
+                        }
+                        glib::timeout_future(std::time::Duration::from_millis(50)).await;
+                    }
+                    if let Ok(result) = rrx.recv().await {
+                        if let Some(d) = dialog_ref.upgrade() { d.close(); }
+                        let Some(win) = win2.upgrade() else { return };
+                        match result {
+                            Ok(name) => {
+                                win.show_toast(&format!("VM '{name}' imported successfully"));
+                                win.refresh_vm_list();
+                            }
+                            Err(e) => win.show_toast(&format!("Import failed: {e}")),
                         }
                     }
                 });
