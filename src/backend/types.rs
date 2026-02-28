@@ -1092,6 +1092,13 @@ impl NetworkSourceType {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConvertNicConfig {
+    pub source_type: NetworkSourceType,
+    pub source_value: String,
+    pub mac_address: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChangeNetworkSourceParams {
     pub source_type: NetworkSourceType,
     pub value: String, // network name, bridge dev, or device path

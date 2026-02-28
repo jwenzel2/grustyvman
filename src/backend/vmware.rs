@@ -9,7 +9,7 @@ use virt::storage_pool::StoragePool;
 
 use crate::backend::backup::{upload_volume_to_pool, unique_vm_name, ProgressFn};
 use crate::backend::connection::get_conn;
-use crate::backend::types::{DiskFormat, FirmwareType, NetworkSourceType};
+use crate::backend::types::{ConvertNicConfig, DiskFormat, FirmwareType, NetworkSourceType};
 use crate::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -39,13 +39,6 @@ pub struct VmwareConfig {
     pub nics: Vec<VmwareNic>,
     pub guest_os: Option<String>,
     pub source_dir: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConvertNicConfig {
-    pub source_type: NetworkSourceType,
-    pub source_value: String,
-    pub mac_address: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -738,7 +731,7 @@ fn generate_converted_domain_xml(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn tempdir(prefix: &str) -> Result<PathBuf, std::io::Error> {
+pub fn tempdir(prefix: &str) -> Result<PathBuf, std::io::Error> {
     let name = format!("{prefix}-{}", std::process::id());
     let path = PathBuf::from("/var/tmp").join(name);
     std::fs::create_dir_all(&path)?;
@@ -764,7 +757,7 @@ fn find_file_with_ext(dir: &Path, ext: &str) -> Option<PathBuf> {
 }
 
 /// Extract local name from a possibly-namespaced XML tag (strip namespace prefix).
-fn local_name(raw: &[u8]) -> String {
+pub fn local_name(raw: &[u8]) -> String {
     let full = String::from_utf8_lossy(raw).to_string();
     if let Some(pos) = full.rfind(':') {
         full[pos + 1..].to_string()
@@ -773,6 +766,6 @@ fn local_name(raw: &[u8]) -> String {
     }
 }
 
-fn attr_val(attr: &quick_xml::events::attributes::Attribute) -> String {
+pub fn attr_val(attr: &quick_xml::events::attributes::Attribute) -> String {
     String::from_utf8_lossy(&attr.value).to_string()
 }

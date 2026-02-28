@@ -9,4 +9,5 @@ pub mod performance;
 pub mod snapshot;
 pub mod storage;
 pub mod types;
+pub mod virtualbox;
 pub mod vmware;
