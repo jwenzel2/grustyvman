@@ -334,9 +334,13 @@ on_action(GtkWidget *widget, gpointer data)
 }
 
 static GtkWidget *
-make_action_btn(GrvViewer *v, const char *label, int action)
+make_action_icon_btn(GrvViewer *v, const char *icon_name, const char *tooltip,
+                     int action)
 {
-    GtkWidget *btn = gtk_button_new_with_label(label);
+    GtkWidget *img = gtk_image_new_from_icon_name(icon_name, GTK_ICON_SIZE_LARGE_TOOLBAR);
+    GtkWidget *btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(btn), img);
+    gtk_widget_set_tooltip_text(btn, tooltip);
     g_object_set_data(G_OBJECT(btn), "grv-viewer", v);
     g_signal_connect(btn, "clicked", G_CALLBACK(on_action), GINT_TO_POINTER(action));
     return btn;
@@ -353,11 +357,17 @@ on_popup_clicked(GtkButton *btn, gpointer data)
 }
 
 static GtkWidget *
-make_popup_btn(const char *label, GtkWidget *menu)
+make_popup_icon_btn(const char *icon_name, const char *tooltip, GtkWidget *menu)
 {
-    gchar *text = g_strdup_printf("%s \342\226\276", label); /* ▾ U+25BE */
-    GtkWidget *btn = gtk_button_new_with_label(text);
-    g_free(text);
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *img = gtk_image_new_from_icon_name(icon_name, GTK_ICON_SIZE_LARGE_TOOLBAR);
+    GtkWidget *arrow = gtk_label_new("\342\226\276"); /* ▾ U+25BE */
+    gtk_box_pack_start(GTK_BOX(box), img,   FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), arrow, FALSE, FALSE, 0);
+
+    GtkWidget *btn = gtk_button_new();
+    gtk_container_add(GTK_CONTAINER(btn), box);
+    gtk_widget_set_tooltip_text(btn, tooltip);
     g_signal_connect(btn, "clicked", G_CALLBACK(on_popup_clicked), menu);
     return btn;
 }
@@ -432,27 +442,34 @@ build_toolbar(GrvViewer *v)
     gtk_widget_set_margin_bottom(bar, 3);
     gtk_style_context_add_class(gtk_widget_get_style_context(bar), "toolbar");
 
-    /* ── VM control buttons ────────────────────────────────────────────── */
+    /* ── VM control buttons (icons with tooltips) ─────────────────────── */
     gtk_box_pack_start(GTK_BOX(bar),
-        make_action_btn(v, "Power On", GRV_ACTION_POWER_ON), FALSE, FALSE, 0);
+        make_action_icon_btn(v, "dialog-information-symbolic", "Power On",
+                             GRV_ACTION_POWER_ON), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar),
-        make_action_btn(v, "Pause",    GRV_ACTION_PAUSE),    FALSE, FALSE, 0);
+        make_action_icon_btn(v, "media-playback-pause-symbolic", "Pause",
+                             GRV_ACTION_PAUSE), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar),
-        make_action_btn(v, "Resume",   GRV_ACTION_RESUME),   FALSE, FALSE, 0);
+        make_action_icon_btn(v, "media-playback-start-symbolic", "Resume",
+                             GRV_ACTION_RESUME), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar),
-        make_action_btn(v, "Shutdown", GRV_ACTION_SHUTDOWN), FALSE, FALSE, 0);
+        make_action_icon_btn(v, "system-shutdown-symbolic", "Shutdown",
+                             GRV_ACTION_SHUTDOWN), FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(bar),
-        make_action_btn(v, "Snapshot", GRV_ACTION_SNAPSHOT), FALSE, FALSE, 0);
+        make_action_icon_btn(v, "view-refresh-symbolic", "Reboot",
+                             GRV_ACTION_REBOOT), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(bar),
+        make_action_icon_btn(v, "camera-photo-symbolic", "Snapshot",
+                             GRV_ACTION_SNAPSHOT), FALSE, FALSE, 0);
 
     /* ── More dropdown ─────────────────────────────────────────────────── */
     {
         GtkWidget *menu = gtk_menu_new();
         const struct { const char *label; int action; } items[] = {
-            { "Reboot",         GRV_ACTION_REBOOT       },
             { "Force Shutdown", GRV_ACTION_FORCE_STOP   },
             { "Force Reboot",   GRV_ACTION_FORCE_REBOOT },
         };
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 2; i++) {
             GtkWidget *it = gtk_menu_item_new_with_label(items[i].label);
             g_object_set_data(G_OBJECT(it), "grv-viewer", v);
             g_signal_connect(it, "activate",
@@ -461,7 +478,8 @@ build_toolbar(GrvViewer *v)
         }
         gtk_widget_show_all(menu);
         gtk_box_pack_start(GTK_BOX(bar),
-            make_popup_btn("More", menu), FALSE, FALSE, 0);
+            make_popup_icon_btn("view-more-symbolic", "More", menu),
+            FALSE, FALSE, 0);
     }
 
     /* ── Separator ─────────────────────────────────────────────────────── */
@@ -480,7 +498,8 @@ build_toolbar(GrvViewer *v)
         }
         gtk_widget_show_all(menu);
         gtk_box_pack_start(GTK_BOX(bar),
-            make_popup_btn("Send Key", menu), FALSE, FALSE, 0);
+            make_popup_icon_btn("input-keyboard-symbolic", "Send Key", menu),
+            FALSE, FALSE, 0);
     }
 
     /* ── View dropdown ─────────────────────────────────────────────────── */
@@ -509,7 +528,8 @@ build_toolbar(GrvViewer *v)
 
         gtk_widget_show_all(menu);
         gtk_box_pack_start(GTK_BOX(bar),
-            make_popup_btn("View", menu), FALSE, FALSE, 0);
+            make_popup_icon_btn("window-new-symbolic", "View", menu),
+            FALSE, FALSE, 0);
     }
 
     return bar;
